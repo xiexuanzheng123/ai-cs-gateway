@@ -68,6 +68,9 @@ func NewServer(cfg config.Config) *gin.Engine {
 	router.POST("/api/customer-service/chat", chatHandler.Send)
 	router.POST("/api/customer-service/feedback", chatHandler.Feedback)
 	router.POST("/api/customer-service/handoff", chatHandler.Handoff)
+	router.GET("/api/customer-service/admin/rules", chatHandler.ListRules)
+	router.POST("/api/customer-service/admin/rules", chatHandler.CreateRule)
+	router.PUT("/api/customer-service/admin/rules/:id", chatHandler.UpdateRule)
 
 	return router
 }

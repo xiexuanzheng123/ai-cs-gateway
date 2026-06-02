@@ -69,3 +69,7 @@ curl -X POST http://localhost:8080/api/customer-service/handoff \
     "source": "h5"
   }'
 ```
+
+```bash
+curl http://localhost:8080/api/customer-service/admin/rules
+```

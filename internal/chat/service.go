@@ -53,6 +53,15 @@ type HandoffResponse struct {
 	Status    string `json:"status"`
 }
 
+type RuleConfigRequest struct {
+	RuleType    string `json:"rule_type" binding:"required"`
+	Pattern     string `json:"pattern" binding:"required"`
+	Action      string `json:"action" binding:"required"`
+	Priority    int    `json:"priority"`
+	Enabled     bool   `json:"enabled"`
+	Description string `json:"description"`
+}
+
 type Service struct {
 	aiClient   AIClient
 	riskRouter *routing.RiskRouter
@@ -217,11 +226,35 @@ func (s *Service) CreateHandoff(ctx context.Context, request HandoffRequest) (Ha
 	}, nil
 }
 
+func (s *Service) ListRules(ctx context.Context) ([]RuleConfigRecord, error) {
+	return s.store.ListRules(ctx)
+}
+
+func (s *Service) CreateRule(ctx context.Context, request RuleConfigRequest) (RuleConfigRecord, error) {
+	return s.store.CreateRule(ctx, ruleRecordFromRequest(0, request))
+}
+
+func (s *Service) UpdateRule(ctx context.Context, id int64, request RuleConfigRequest) (RuleConfigRecord, error) {
+	return s.store.UpdateRule(ctx, ruleRecordFromRequest(id, request))
+}
+
 func firstNonEmpty(value string, fallback string) string {
 	if value != "" {
 		return value
 	}
 	return fallback
+}
+
+func ruleRecordFromRequest(id int64, request RuleConfigRequest) RuleConfigRecord {
+	return RuleConfigRecord{
+		ID:          id,
+		RuleType:    request.RuleType,
+		Pattern:     request.Pattern,
+		Action:      request.Action,
+		Priority:    request.Priority,
+		Enabled:     request.Enabled,
+		Description: request.Description,
+	}
 }
 
 func elapsedMilliseconds(startedAt time.Time) int {

@@ -49,12 +49,25 @@ type HandoffRecord struct {
 	Status         string
 }
 
+type RuleConfigRecord struct {
+	ID          int64  `json:"id"`
+	RuleType    string `json:"rule_type"`
+	Pattern     string `json:"pattern"`
+	Action      string `json:"action"`
+	Priority    int    `json:"priority"`
+	Enabled     bool   `json:"enabled"`
+	Description string `json:"description"`
+}
+
 type Store interface {
 	SaveConversation(ctx context.Context, record ConversationRecord) error
 	SaveMessage(ctx context.Context, record MessageRecord) error
 	SaveAIEvent(ctx context.Context, record AIEventRecord) error
 	SaveFeedback(ctx context.Context, record FeedbackRecord) error
 	SaveHandoff(ctx context.Context, record HandoffRecord) error
+	ListRules(ctx context.Context) ([]RuleConfigRecord, error)
+	CreateRule(ctx context.Context, record RuleConfigRecord) (RuleConfigRecord, error)
+	UpdateRule(ctx context.Context, record RuleConfigRecord) (RuleConfigRecord, error)
 }
 
 type NoopStore struct{}
@@ -77,4 +90,17 @@ func (NoopStore) SaveFeedback(ctx context.Context, record FeedbackRecord) error 
 
 func (NoopStore) SaveHandoff(ctx context.Context, record HandoffRecord) error {
 	return nil
+}
+
+func (NoopStore) ListRules(ctx context.Context) ([]RuleConfigRecord, error) {
+	return []RuleConfigRecord{}, nil
+}
+
+func (NoopStore) CreateRule(ctx context.Context, record RuleConfigRecord) (RuleConfigRecord, error) {
+	record.ID = 0
+	return record, nil
+}
+
+func (NoopStore) UpdateRule(ctx context.Context, record RuleConfigRecord) (RuleConfigRecord, error) {
+	return record, nil
 }

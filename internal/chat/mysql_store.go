@@ -114,3 +114,88 @@ func (s *MySQLStore) SaveHandoff(ctx context.Context, record HandoffRecord) erro
 	}
 	return nil
 }
+
+func (s *MySQLStore) ListRules(ctx context.Context) ([]RuleConfigRecord, error) {
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT id, rule_type, pattern, action, priority, enabled, COALESCE(description, '')
+		 FROM cs_rule_config
+		 ORDER BY priority DESC, id DESC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list rules: %w", err)
+	}
+	defer rows.Close()
+
+	rules := []RuleConfigRecord{}
+	for rows.Next() {
+		var rule RuleConfigRecord
+		if err := rows.Scan(
+			&rule.ID,
+			&rule.RuleType,
+			&rule.Pattern,
+			&rule.Action,
+			&rule.Priority,
+			&rule.Enabled,
+			&rule.Description,
+		); err != nil {
+			return nil, fmt.Errorf("scan rule: %w", err)
+		}
+		rules = append(rules, rule)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rules: %w", err)
+	}
+	return rules, nil
+}
+
+func (s *MySQLStore) CreateRule(ctx context.Context, record RuleConfigRecord) (RuleConfigRecord, error) {
+	result, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO cs_rule_config
+		 (rule_type, pattern, action, priority, enabled, description)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		record.RuleType,
+		record.Pattern,
+		record.Action,
+		record.Priority,
+		record.Enabled,
+		record.Description,
+	)
+	if err != nil {
+		return RuleConfigRecord{}, fmt.Errorf("create rule: %w", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return RuleConfigRecord{}, fmt.Errorf("get rule id: %w", err)
+	}
+	record.ID = id
+	return record, nil
+}
+
+func (s *MySQLStore) UpdateRule(ctx context.Context, record RuleConfigRecord) (RuleConfigRecord, error) {
+	result, err := s.db.ExecContext(
+		ctx,
+		`UPDATE cs_rule_config
+		 SET rule_type = ?, pattern = ?, action = ?, priority = ?, enabled = ?, description = ?
+		 WHERE id = ?`,
+		record.RuleType,
+		record.Pattern,
+		record.Action,
+		record.Priority,
+		record.Enabled,
+		record.Description,
+		record.ID,
+	)
+	if err != nil {
+		return RuleConfigRecord{}, fmt.Errorf("update rule: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return RuleConfigRecord{}, fmt.Errorf("get affected rows: %w", err)
+	}
+	if affected == 0 {
+		return RuleConfigRecord{}, fmt.Errorf("rule not found")
+	}
+	return record, nil
+}
