@@ -75,3 +75,22 @@ func (s *MySQLStore) SaveAIEvent(ctx context.Context, record AIEventRecord) erro
 	}
 	return nil
 }
+
+func (s *MySQLStore) SaveFeedback(ctx context.Context, record FeedbackRecord) error {
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO cs_feedback
+		 (conversation_id, message_id, user_id, rating, comment, action_taken)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		record.ConversationID,
+		record.MessageID,
+		record.UserID,
+		record.Rating,
+		record.Comment,
+		record.ActionTaken,
+	)
+	if err != nil {
+		return fmt.Errorf("save feedback: %w", err)
+	}
+	return nil
+}

@@ -26,6 +26,19 @@ type SendMessageResponse struct {
 	Suggestions     []string `json:"suggestions"`
 }
 
+type FeedbackRequest struct {
+	ConversationID string `json:"conversation_id" binding:"required"`
+	MessageID      string `json:"message_id" binding:"required"`
+	UserID         string `json:"user_id" binding:"required"`
+	Rating         string `json:"rating" binding:"required"`
+	Comment        string `json:"comment"`
+	ActionTaken    string `json:"action_taken"`
+}
+
+type FeedbackResponse struct {
+	Success bool `json:"success"`
+}
+
 type Service struct {
 	aiClient   AIClient
 	riskRouter *routing.RiskRouter
@@ -149,6 +162,20 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 		return SendMessageResponse{}, err
 	}
 	return response, nil
+}
+
+func (s *Service) SaveFeedback(ctx context.Context, request FeedbackRequest) (FeedbackResponse, error) {
+	if err := s.store.SaveFeedback(ctx, FeedbackRecord{
+		ConversationID: request.ConversationID,
+		MessageID:      request.MessageID,
+		UserID:         request.UserID,
+		Rating:         request.Rating,
+		Comment:        request.Comment,
+		ActionTaken:    request.ActionTaken,
+	}); err != nil {
+		return FeedbackResponse{}, err
+	}
+	return FeedbackResponse{Success: true}, nil
 }
 
 func firstNonEmpty(value string, fallback string) string {
