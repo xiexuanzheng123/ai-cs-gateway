@@ -57,3 +57,15 @@ curl -X POST http://localhost:8080/api/customer-service/chat \
     }
   }'
 ```
+
+```bash
+curl -X POST http://localhost:8080/api/customer-service/handoff \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "conversation_id": "session-local",
+    "message_id": "message-local",
+    "user_id": "demo-user-001",
+    "reason": "user_requested",
+    "source": "h5"
+  }'
+```

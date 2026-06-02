@@ -94,3 +94,23 @@ func (s *MySQLStore) SaveFeedback(ctx context.Context, record FeedbackRecord) er
 	}
 	return nil
 }
+
+func (s *MySQLStore) SaveHandoff(ctx context.Context, record HandoffRecord) error {
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO cs_handoff_event
+		 (handoff_id, conversation_id, message_id, user_id, reason, source, status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		record.HandoffID,
+		record.ConversationID,
+		record.MessageID,
+		record.UserID,
+		record.Reason,
+		record.Source,
+		record.Status,
+	)
+	if err != nil {
+		return fmt.Errorf("save handoff: %w", err)
+	}
+	return nil
+}

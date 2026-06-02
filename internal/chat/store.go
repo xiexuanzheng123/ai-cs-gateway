@@ -39,11 +39,22 @@ type FeedbackRecord struct {
 	ActionTaken    string
 }
 
+type HandoffRecord struct {
+	HandoffID      string
+	ConversationID string
+	MessageID      string
+	UserID         string
+	Reason         string
+	Source         string
+	Status         string
+}
+
 type Store interface {
 	SaveConversation(ctx context.Context, record ConversationRecord) error
 	SaveMessage(ctx context.Context, record MessageRecord) error
 	SaveAIEvent(ctx context.Context, record AIEventRecord) error
 	SaveFeedback(ctx context.Context, record FeedbackRecord) error
+	SaveHandoff(ctx context.Context, record HandoffRecord) error
 }
 
 type NoopStore struct{}
@@ -61,5 +72,9 @@ func (NoopStore) SaveAIEvent(ctx context.Context, record AIEventRecord) error {
 }
 
 func (NoopStore) SaveFeedback(ctx context.Context, record FeedbackRecord) error {
+	return nil
+}
+
+func (NoopStore) SaveHandoff(ctx context.Context, record HandoffRecord) error {
 	return nil
 }

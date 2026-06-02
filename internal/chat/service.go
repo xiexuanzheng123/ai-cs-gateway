@@ -39,6 +39,20 @@ type FeedbackResponse struct {
 	Success bool `json:"success"`
 }
 
+type HandoffRequest struct {
+	ConversationID string `json:"conversation_id" binding:"required"`
+	MessageID      string `json:"message_id"`
+	UserID         string `json:"user_id" binding:"required"`
+	Reason         string `json:"reason"`
+	Source         string `json:"source"`
+}
+
+type HandoffResponse struct {
+	Success   bool   `json:"success"`
+	HandoffID string `json:"handoff_id"`
+	Status    string `json:"status"`
+}
+
 type Service struct {
 	aiClient   AIClient
 	riskRouter *routing.RiskRouter
@@ -180,6 +194,27 @@ func (s *Service) SaveFeedback(ctx context.Context, request FeedbackRequest) (Fe
 		return FeedbackResponse{}, err
 	}
 	return FeedbackResponse{Success: true}, nil
+}
+
+func (s *Service) CreateHandoff(ctx context.Context, request HandoffRequest) (HandoffResponse, error) {
+	handoffID := newID("handoff")
+	status := "transferred"
+	if err := s.store.SaveHandoff(ctx, HandoffRecord{
+		HandoffID:      handoffID,
+		ConversationID: request.ConversationID,
+		MessageID:      request.MessageID,
+		UserID:         request.UserID,
+		Reason:         firstNonEmpty(request.Reason, "user_requested"),
+		Source:         firstNonEmpty(request.Source, "h5"),
+		Status:         status,
+	}); err != nil {
+		return HandoffResponse{}, err
+	}
+	return HandoffResponse{
+		Success:   true,
+		HandoffID: handoffID,
+		Status:    status,
+	}, nil
 }
 
 func firstNonEmpty(value string, fallback string) string {
