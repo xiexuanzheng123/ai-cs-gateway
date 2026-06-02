@@ -26,19 +26,47 @@ type SendMessageResponse struct {
 }
 
 type Service struct {
-	aiClient   *ai.Client
+	aiClient   AIClient
 	riskRouter *routing.RiskRouter
+	store      Store
 }
 
-func NewService(aiClient *ai.Client, riskRouter *routing.RiskRouter) *Service {
-	return &Service{aiClient: aiClient, riskRouter: riskRouter}
+type AIClient interface {
+	Reply(ctx context.Context, request ai.ReplyRequest) (ai.ReplyResponse, error)
+}
+
+func NewService(aiClient AIClient, riskRouter *routing.RiskRouter, store Store) *Service {
+	if store == nil {
+		store = NoopStore{}
+	}
+	return &Service{aiClient: aiClient, riskRouter: riskRouter, store: store}
 }
 
 func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMessageResponse, error) {
 	sessionID := firstNonEmpty(request.SessionID, newID("session"))
 	messageID := newID("message")
+	channel := firstNonEmpty(request.Source, "h5")
+
+	if err := s.store.SaveConversation(ctx, ConversationRecord{
+		ConversationID: sessionID,
+		UserID:         request.UserID,
+		Channel:        channel,
+		Status:         "active",
+	}); err != nil {
+		return SendMessageResponse{}, err
+	}
+	if err := s.store.SaveMessage(ctx, MessageRecord{
+		MessageID:      messageID,
+		ConversationID: sessionID,
+		SenderType:     "user",
+		MessageType:    "text",
+		Content:        request.Message,
+	}); err != nil {
+		return SendMessageResponse{}, err
+	}
+
 	if result, matched := s.riskRouter.Match(request.Message); matched {
-		return SendMessageResponse{
+		response := SendMessageResponse{
 			SessionID:       sessionID,
 			MessageID:       messageID,
 			Reply:           result.Reply,
@@ -47,7 +75,17 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 			RiskLevel:       result.RiskLevel,
 			Intent:          result.Intent,
 			Suggestions:     result.Suggestions,
-		}, nil
+		}
+		if err := s.store.SaveMessage(ctx, MessageRecord{
+			MessageID:      newID("message"),
+			ConversationID: sessionID,
+			SenderType:     "assistant",
+			MessageType:    "text",
+			Content:        response.Reply,
+		}); err != nil {
+			return SendMessageResponse{}, err
+		}
+		return response, nil
 	}
 
 	aiResponse, err := s.aiClient.Reply(ctx, ai.ReplyRequest{
@@ -61,7 +99,7 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 		return SendMessageResponse{}, err
 	}
 
-	return SendMessageResponse{
+	response := SendMessageResponse{
 		SessionID:       sessionID,
 		MessageID:       messageID,
 		Reply:           aiResponse.Reply,
@@ -70,7 +108,17 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 		RiskLevel:       aiResponse.RiskLevel,
 		Intent:          aiResponse.Intent,
 		Suggestions:     aiResponse.Suggestions,
-	}, nil
+	}
+	if err := s.store.SaveMessage(ctx, MessageRecord{
+		MessageID:      newID("message"),
+		ConversationID: sessionID,
+		SenderType:     "assistant",
+		MessageType:    "text",
+		Content:        response.Reply,
+	}); err != nil {
+		return SendMessageResponse{}, err
+	}
+	return response, nil
 }
 
 func firstNonEmpty(value string, fallback string) string {
