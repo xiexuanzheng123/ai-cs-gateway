@@ -1,10 +1,9 @@
 package chat
 
 import (
-	"context"
-
 	"ai-cs-gateway/internal/ai"
 	"ai-cs-gateway/internal/routing"
+	"context"
 )
 
 type SendMessageRequest struct {
@@ -38,7 +37,6 @@ func NewService(aiClient *ai.Client, riskRouter *routing.RiskRouter) *Service {
 func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMessageResponse, error) {
 	sessionID := firstNonEmpty(request.SessionID, newID("session"))
 	messageID := newID("message")
-
 	if result, matched := s.riskRouter.Match(request.Message); matched {
 		return SendMessageResponse{
 			SessionID:       sessionID,

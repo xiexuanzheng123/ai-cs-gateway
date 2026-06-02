@@ -15,9 +15,9 @@ import (
 func NewServer(cfg config.Config) *gin.Engine {
 	router := gin.Default()
 
-	aiClient := ai.NewClient(cfg.AIServiceBaseURL, 3*time.Second)
-	chatService := chat.NewService(aiClient, routing.NewRiskRouter())
-	chatHandler := chat.NewHandler(chatService)
+	aiClient := ai.NewClient(cfg.AIServiceBaseURL, 3*time.Second)     // 下游 AI 服务客户端
+	chatService := chat.NewService(aiClient, routing.NewRiskRouter()) // 业务层
+	chatHandler := chat.NewHandler(chatService)                       // HTTP处理层
 
 	router.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
