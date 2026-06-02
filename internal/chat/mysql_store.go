@@ -51,3 +51,27 @@ func (s *MySQLStore) SaveMessage(ctx context.Context, record MessageRecord) erro
 	}
 	return nil
 }
+
+func (s *MySQLStore) SaveAIEvent(ctx context.Context, record AIEventRecord) error {
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO cs_ai_event
+		 (trace_id, conversation_id, message_id, intent, route, response_type,
+		  handoff_required, handoff_reason, latency_ms, model_used)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		record.TraceID,
+		record.ConversationID,
+		record.MessageID,
+		record.Intent,
+		record.Route,
+		record.ResponseType,
+		record.HandoffRequired,
+		record.HandoffReason,
+		record.LatencyMS,
+		record.ModelUsed,
+	)
+	if err != nil {
+		return fmt.Errorf("save ai event: %w", err)
+	}
+	return nil
+}

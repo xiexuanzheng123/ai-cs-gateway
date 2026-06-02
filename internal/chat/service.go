@@ -4,6 +4,7 @@ import (
 	"ai-cs-gateway/internal/ai"
 	"ai-cs-gateway/internal/routing"
 	"context"
+	"time"
 )
 
 type SendMessageRequest struct {
@@ -43,6 +44,8 @@ func NewService(aiClient AIClient, riskRouter *routing.RiskRouter, store Store) 
 }
 
 func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMessageResponse, error) {
+	startedAt := time.Now()
+	traceID := newID("trace")
 	sessionID := firstNonEmpty(request.SessionID, newID("session"))
 	messageID := newID("message")
 	channel := firstNonEmpty(request.Source, "h5")
@@ -85,6 +88,19 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 		}); err != nil {
 			return SendMessageResponse{}, err
 		}
+		if err := s.store.SaveAIEvent(ctx, AIEventRecord{
+			TraceID:         traceID,
+			ConversationID:  sessionID,
+			MessageID:       messageID,
+			Intent:          response.Intent,
+			Route:           "rule_handoff",
+			ResponseType:    response.ReplyType,
+			HandoffRequired: response.TransferToHuman,
+			HandoffReason:   response.Intent,
+			LatencyMS:       elapsedMilliseconds(startedAt),
+		}); err != nil {
+			return SendMessageResponse{}, err
+		}
 		return response, nil
 	}
 
@@ -118,6 +134,20 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 	}); err != nil {
 		return SendMessageResponse{}, err
 	}
+	if err := s.store.SaveAIEvent(ctx, AIEventRecord{
+		TraceID:         traceID,
+		ConversationID:  sessionID,
+		MessageID:       messageID,
+		Intent:          response.Intent,
+		Route:           "ai_reply",
+		ResponseType:    response.ReplyType,
+		HandoffRequired: response.TransferToHuman,
+		HandoffReason:   "",
+		LatencyMS:       elapsedMilliseconds(startedAt),
+		ModelUsed:       "mock",
+	}); err != nil {
+		return SendMessageResponse{}, err
+	}
 	return response, nil
 }
 
@@ -126,4 +156,12 @@ func firstNonEmpty(value string, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func elapsedMilliseconds(startedAt time.Time) int {
+	elapsed := time.Since(startedAt).Milliseconds()
+	if elapsed < 0 {
+		return 0
+	}
+	return int(elapsed)
 }
