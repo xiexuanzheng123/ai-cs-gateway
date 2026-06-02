@@ -42,11 +42,11 @@ MYSQL_DSN=ai_cs:ai_cs_pass@tcp(127.0.0.1:3306)/ai_customer_service?parseTime=tru
 ## API
 
 ```bash
-curl http://localhost:8080/healthz
+curl http://localhost:8080/api/customer-service/health
 ```
 
 ```bash
-curl -X POST http://localhost:8080/api/chat/send \
+curl -X POST http://localhost:8080/api/customer-service/chat \
   -H 'Content-Type: application/json' \
   -d '{
     "user_id": "demo-user-001",

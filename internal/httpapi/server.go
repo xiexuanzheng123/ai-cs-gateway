@@ -45,7 +45,7 @@ func NewServer(cfg config.Config) *gin.Engine {
 	chatService := chat.NewService(aiClient, routing.NewRiskRouter(), chatStore)
 	chatHandler := chat.NewHandler(chatService)
 
-	router.GET("/healthz", func(c *gin.Context) {
+	router.GET("/api/customer-service/health", func(c *gin.Context) {
 		mysqlStatus := checkStatus(c.Request.Context(), mysqlDB == nil, func(ctx context.Context) error {
 			return mysqlDB.PingContext(ctx)
 		})
@@ -65,8 +65,7 @@ func NewServer(cfg config.Config) *gin.Engine {
 		})
 	})
 
-	router.POST("/api/chat/send", chatHandler.Send)
-
+	router.POST("/api/customer-service/chat", chatHandler.Send)
 	router.POST("/api/customer-service/feedback", chatHandler.Feedback)
 
 	return router
