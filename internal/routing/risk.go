@@ -3,10 +3,12 @@ package routing
 import "strings"
 
 type RiskResult struct {
-	Intent      string
-	RiskLevel   string
-	Reply       string
-	Suggestions []string
+	Intent          string
+	Route           string
+	RiskLevel       string
+	Reply           string
+	TransferToHuman bool
+	Suggestions     []string
 }
 
 type RiskRouter struct{}
@@ -33,16 +35,57 @@ func (r *RiskRouter) Match(message string) (RiskResult, bool) {
 	if containsAny(normalized, []string{"支付争议", "扣款异常", "重复扣款"}) {
 		return handoff("payment_dispute", "支付争议需要人工客服核实支付流水，我已经为您转人工处理。"), true
 	}
+	if containsAny(normalized, []string{"密码错误过多", "密码错误太多"}) {
+		return fixedFAQ(
+			"faq_password_too_many_failures",
+			"密码错误次数过多时，建议您先等待一段时间后再尝试登录，或通过找回账号密码重新设置密码。如果仍无法登录，可以继续转人工处理。",
+			[]string{"找回账号密码", "账号异常设备登录", "转人工"},
+		), true
+	}
+	if containsAny(normalized, []string{"找回账号密码", "找回密码", "忘记密码"}) {
+		return fixedFAQ(
+			"faq_recover_account_password",
+			"您可以在登录页选择找回账号或忘记密码，根据手机号、绑定信息或身份校验流程完成账号密码找回。",
+			[]string{"密码错误过多", "账号异常设备登录", "转人工"},
+		), true
+	}
+	if containsAny(normalized, []string{"账号异常设备登录", "异常设备登录", "异地登录"}) {
+		return fixedFAQ(
+			"faq_abnormal_device_login",
+			"如果发现账号存在异常设备登录，建议您尽快修改密码，并检查绑定手机号和登录设备。如有资金或账号安全风险，可以转人工处理。",
+			[]string{"修改密码", "账号安全", "转人工"},
+		), true
+	}
+	if containsAny(normalized, []string{"账号违规举报", "违规举报", "举报账号"}) {
+		return fixedFAQ(
+			"faq_report_account_violation",
+			"账号违规举报需要提供被举报账号、违规说明和相关截图。您提交后会进入人工审核流程。",
+			[]string{"补充截图", "继续描述问题", "转人工"},
+		), true
+	}
 
 	return RiskResult{}, false
 }
 
 func handoff(intent string, reply string) RiskResult {
 	return RiskResult{
-		Intent:      intent,
-		RiskLevel:   "high",
-		Reply:       reply,
-		Suggestions: []string{"补充问题描述", "上传截图", "等待人工客服"},
+		Intent:          intent,
+		Route:           "rule_handoff",
+		RiskLevel:       "high",
+		Reply:           reply,
+		TransferToHuman: true,
+		Suggestions:     []string{"补充问题描述", "上传截图", "等待人工客服"},
+	}
+}
+
+func fixedFAQ(intent string, reply string, suggestions []string) RiskResult {
+	return RiskResult{
+		Intent:          intent,
+		Route:           "fixed_faq",
+		RiskLevel:       "low",
+		Reply:           reply,
+		TransferToHuman: false,
+		Suggestions:     suggestions,
 	}
 }
 

@@ -82,12 +82,16 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 	}
 
 	if result, matched := s.riskRouter.Match(request.Message); matched {
+		replyType := "answer"
+		if result.TransferToHuman {
+			replyType = "handoff"
+		}
 		response := SendMessageResponse{
 			SessionID:       sessionID,
 			MessageID:       messageID,
 			Reply:           result.Reply,
-			ReplyType:       "handoff",
-			TransferToHuman: true,
+			ReplyType:       replyType,
+			TransferToHuman: result.TransferToHuman,
 			RiskLevel:       result.RiskLevel,
 			Intent:          result.Intent,
 			Suggestions:     result.Suggestions,
@@ -106,10 +110,10 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 			ConversationID:  sessionID,
 			MessageID:       messageID,
 			Intent:          response.Intent,
-			Route:           "rule_handoff",
+			Route:           result.Route,
 			ResponseType:    response.ReplyType,
 			HandoffRequired: response.TransferToHuman,
-			HandoffReason:   response.Intent,
+			HandoffReason:   handoffReason(response),
 			LatencyMS:       elapsedMilliseconds(startedAt),
 		}); err != nil {
 			return SendMessageResponse{}, err
@@ -191,4 +195,11 @@ func elapsedMilliseconds(startedAt time.Time) int {
 		return 0
 	}
 	return int(elapsed)
+}
+
+func handoffReason(response SendMessageResponse) string {
+	if !response.TransferToHuman {
+		return ""
+	}
+	return response.Intent
 }
