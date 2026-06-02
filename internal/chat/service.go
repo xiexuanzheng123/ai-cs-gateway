@@ -63,9 +63,10 @@ type RuleConfigRequest struct {
 }
 
 type Service struct {
-	aiClient   AIClient
-	riskRouter *routing.RiskRouter
-	store      Store
+	aiClient      AIClient
+	riskRouter    *routing.RiskRouter
+	dynamicRouter *routing.DynamicRuleRouter
+	store         Store
 }
 
 type AIClient interface {
@@ -76,7 +77,12 @@ func NewService(aiClient AIClient, riskRouter *routing.RiskRouter, store Store) 
 	if store == nil {
 		store = NoopStore{}
 	}
-	return &Service{aiClient: aiClient, riskRouter: riskRouter, store: store}
+	return &Service{
+		aiClient:      aiClient,
+		riskRouter:    riskRouter,
+		dynamicRouter: routing.NewDynamicRuleRouter(),
+		store:         store,
+	}
 }
 
 func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMessageResponse, error) {
@@ -104,7 +110,7 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 		return SendMessageResponse{}, err
 	}
 
-	if result, matched := s.riskRouter.Match(request.Message); matched {
+	if result, matched := s.matchRule(request.Message); matched {
 		replyType := "answer"
 		if result.TransferToHuman {
 			replyType = "handoff"
@@ -236,6 +242,35 @@ func (s *Service) CreateRule(ctx context.Context, request RuleConfigRequest) (Ru
 
 func (s *Service) UpdateRule(ctx context.Context, id int64, request RuleConfigRequest) (RuleConfigRecord, error) {
 	return s.store.UpdateRule(ctx, ruleRecordFromRequest(id, request))
+}
+
+func (s *Service) ReloadRules(ctx context.Context) error {
+	rules, err := s.store.ListEnabledRules(ctx)
+	if err != nil {
+		return err
+	}
+
+	dynamicRules := make([]routing.DynamicRule, 0, len(rules))
+	for _, rule := range rules {
+		dynamicRules = append(dynamicRules, routing.DynamicRule{
+			ID:          rule.ID,
+			RuleType:    rule.RuleType,
+			Pattern:     rule.Pattern,
+			Action:      rule.Action,
+			Priority:    rule.Priority,
+			Enabled:     rule.Enabled,
+			Description: rule.Description,
+		})
+	}
+	s.dynamicRouter.ReplaceRules(dynamicRules)
+	return nil
+}
+
+func (s *Service) matchRule(message string) (routing.RiskResult, bool) {
+	if result, matched := s.dynamicRouter.Match(message); matched {
+		return result, true
+	}
+	return s.riskRouter.Match(message)
 }
 
 func firstNonEmpty(value string, fallback string) string {

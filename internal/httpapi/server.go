@@ -43,6 +43,9 @@ func NewServer(cfg config.Config) *gin.Engine {
 
 	aiClient := ai.NewClient(cfg.AIServiceBaseURL, 3*time.Second)
 	chatService := chat.NewService(aiClient, routing.NewRiskRouter(), chatStore)
+	if err := chatService.ReloadRules(context.Background()); err != nil {
+		log.Printf("load rules: %v", err)
+	}
 	chatHandler := chat.NewHandler(chatService)
 
 	router.GET("/api/customer-service/health", func(c *gin.Context) {
@@ -71,6 +74,7 @@ func NewServer(cfg config.Config) *gin.Engine {
 	router.GET("/api/customer-service/admin/rules", chatHandler.ListRules)
 	router.POST("/api/customer-service/admin/rules", chatHandler.CreateRule)
 	router.PUT("/api/customer-service/admin/rules/:id", chatHandler.UpdateRule)
+	router.POST("/api/customer-service/admin/rules/reload", chatHandler.ReloadRules)
 
 	return router
 }

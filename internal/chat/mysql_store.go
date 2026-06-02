@@ -125,6 +125,24 @@ func (s *MySQLStore) ListRules(ctx context.Context) ([]RuleConfigRecord, error) 
 	if err != nil {
 		return nil, fmt.Errorf("list rules: %w", err)
 	}
+	return scanRules(rows)
+}
+
+func (s *MySQLStore) ListEnabledRules(ctx context.Context) ([]RuleConfigRecord, error) {
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT id, rule_type, pattern, action, priority, enabled, COALESCE(description, '')
+		 FROM cs_rule_config
+		 WHERE enabled = 1
+		 ORDER BY priority DESC, id DESC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list rules: %w", err)
+	}
+	return scanRules(rows)
+}
+
+func scanRules(rows *sql.Rows) ([]RuleConfigRecord, error) {
 	defer rows.Close()
 
 	rules := []RuleConfigRecord{}

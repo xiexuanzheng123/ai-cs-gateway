@@ -66,6 +66,7 @@ type Store interface {
 	SaveFeedback(ctx context.Context, record FeedbackRecord) error
 	SaveHandoff(ctx context.Context, record HandoffRecord) error
 	ListRules(ctx context.Context) ([]RuleConfigRecord, error)
+	ListEnabledRules(ctx context.Context) ([]RuleConfigRecord, error)
 	CreateRule(ctx context.Context, record RuleConfigRecord) (RuleConfigRecord, error)
 	UpdateRule(ctx context.Context, record RuleConfigRecord) (RuleConfigRecord, error)
 }
@@ -93,6 +94,10 @@ func (NoopStore) SaveHandoff(ctx context.Context, record HandoffRecord) error {
 }
 
 func (NoopStore) ListRules(ctx context.Context) ([]RuleConfigRecord, error) {
+	return []RuleConfigRecord{}, nil
+}
+
+func (NoopStore) ListEnabledRules(ctx context.Context) ([]RuleConfigRecord, error) {
 	return []RuleConfigRecord{}, nil
 }
 

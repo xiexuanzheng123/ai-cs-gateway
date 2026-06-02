@@ -110,3 +110,12 @@ func (h *Handler) UpdateRule(c *gin.Context) {
 
 	c.JSON(http.StatusOK, rule)
 }
+
+func (h *Handler) ReloadRules(c *gin.Context) {
+	if err := h.service.ReloadRules(c.Request.Context()); err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
