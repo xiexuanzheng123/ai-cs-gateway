@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"context"
+	"database/sql"
 	"log"
 	"net/http"
 	"time"
@@ -18,12 +20,25 @@ func NewServer(cfg config.Config) *gin.Engine {
 	router := gin.Default()
 
 	chatStore := chat.Store(chat.NoopStore{})
+	var mysqlDB *sql.DB
 	if cfg.MySQLDSN != "" {
 		db, err := storage.OpenMySQL(cfg.MySQLDSN)
 		if err != nil {
 			log.Fatalf("connect mysql: %v", err)
 		}
+		mysqlDB = db
 		chatStore = chat.NewMySQLStore(db)
+	}
+
+	var redisCheck func(context.Context) error
+	if cfg.RedisAddr != "" {
+		redisClient, err := storage.OpenRedis(context.Background(), cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
+		if err != nil {
+			log.Fatalf("connect redis: %v", err)
+		}
+		redisCheck = func(ctx context.Context) error {
+			return redisClient.Ping(ctx).Err()
+		}
 	}
 
 	aiClient := ai.NewClient(cfg.AIServiceBaseURL, 3*time.Second)
@@ -31,7 +46,23 @@ func NewServer(cfg config.Config) *gin.Engine {
 	chatHandler := chat.NewHandler(chatService)
 
 	router.GET("/healthz", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		mysqlStatus := checkStatus(c.Request.Context(), mysqlDB == nil, func(ctx context.Context) error {
+			return mysqlDB.PingContext(ctx)
+		})
+		redisStatus := checkStatus(c.Request.Context(), redisCheck == nil, redisCheck)
+
+		status := "ok"
+		httpStatus := http.StatusOK
+		if mysqlStatus == "error" || redisStatus == "error" {
+			status = "error"
+			httpStatus = http.StatusServiceUnavailable
+		}
+
+		c.JSON(httpStatus, gin.H{
+			"status": status,
+			"mysql":  mysqlStatus,
+			"redis":  redisStatus,
+		})
 	})
 
 	router.POST("/api/chat/send", chatHandler.Send)
@@ -39,4 +70,14 @@ func NewServer(cfg config.Config) *gin.Engine {
 	router.POST("/api/customer-service/feedback", chatHandler.Feedback)
 
 	return router
+}
+
+func checkStatus(ctx context.Context, disabled bool, check func(context.Context) error) string {
+	if disabled {
+		return "disabled"
+	}
+	if err := check(ctx); err != nil {
+		return "error"
+	}
+	return "ok"
 }
