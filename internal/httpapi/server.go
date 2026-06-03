@@ -41,7 +41,7 @@ func NewServer(cfg config.Config) *gin.Engine {
 		}
 	}
 
-	aiClient := ai.NewClient(cfg.AIServiceBaseURL, 3*time.Second)
+	aiClient := ai.NewClient(cfg.AIServiceBaseURL, time.Duration(cfg.AIServiceTimeoutSeconds)*time.Second)
 	chatService := chat.NewService(aiClient, routing.NewRiskRouter(), chatStore)
 	if err := chatService.ReloadRules(context.Background()); err != nil {
 		log.Printf("load rules: %v", err)
@@ -71,6 +71,7 @@ func NewServer(cfg config.Config) *gin.Engine {
 	router.POST("/api/customer-service/chat", chatHandler.Send)
 	router.POST("/api/customer-service/feedback", chatHandler.Feedback)
 	router.POST("/api/customer-service/handoff", chatHandler.Handoff)
+	router.POST("/api/customer-service/rag/search", chatHandler.SearchRAG)
 	router.GET("/api/customer-service/admin/rules", chatHandler.ListRules)
 	router.POST("/api/customer-service/admin/rules", chatHandler.CreateRule)
 	router.PUT("/api/customer-service/admin/rules/:id", chatHandler.UpdateRule)
@@ -81,6 +82,7 @@ func NewServer(cfg config.Config) *gin.Engine {
 	router.GET("/api/customer-service/admin/knowledge", chatHandler.ListKnowledge)
 	router.POST("/api/customer-service/admin/knowledge", chatHandler.CreateKnowledge)
 	router.PUT("/api/customer-service/admin/knowledge/:id", chatHandler.UpdateKnowledge)
+	router.POST("/api/customer-service/admin/knowledge/chunks/sync", chatHandler.SyncKnowledgeChunks)
 	router.GET("/api/customer-service/admin/rag-eval-cases", chatHandler.ListRAGEvalCases)
 	router.POST("/api/customer-service/admin/rag-eval-cases", chatHandler.CreateRAGEvalCase)
 	router.PUT("/api/customer-service/admin/rag-eval-cases/:id", chatHandler.UpdateRAGEvalCase)

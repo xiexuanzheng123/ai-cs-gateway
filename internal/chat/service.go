@@ -4,7 +4,10 @@ import (
 	"ai-cs-gateway/internal/ai"
 	"ai-cs-gateway/internal/routing"
 	"context"
+	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type SendMessageRequest struct {
@@ -99,6 +102,11 @@ type RAGEvalCaseRequest struct {
 	Status              string `json:"status" binding:"required"`
 }
 
+type RAGSearchRequest struct {
+	Query string `json:"query" binding:"required"`
+	TopK  int    `json:"top_k"`
+}
+
 type Service struct {
 	aiClient      AIClient
 	riskRouter    *routing.RiskRouter
@@ -108,6 +116,8 @@ type Service struct {
 
 type AIClient interface {
 	Reply(ctx context.Context, request ai.ReplyRequest) (ai.ReplyResponse, error)
+	UpsertVectors(ctx context.Context, request ai.VectorUpsertRequest) (ai.VectorUpsertResponse, error)
+	SearchVectors(ctx context.Context, request ai.VectorSearchRequest) (ai.VectorSearchResponse, error)
 }
 
 func NewService(aiClient AIClient, riskRouter *routing.RiskRouter, store Store) *Service {
@@ -167,6 +177,20 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 		})
 	}
 
+	ragResult, ragMatched, err := s.SearchRAG(ctx, request.Message, 3)
+	if err != nil {
+		return SendMessageResponse{}, err
+	}
+	if ragMatched {
+		return s.saveRoutedResponse(ctx, startedAt, traceID, request, routing.RiskResult{
+			Intent:      "rag_knowledge",
+			Route:       "rag",
+			RiskLevel:   "low",
+			Reply:       ragReply(ragResult),
+			Suggestions: []string{"有用", "没用", "转人工"},
+		})
+	}
+
 	aiResponse, err := s.aiClient.Reply(ctx, ai.ReplyRequest{
 		SessionID:       conversationID,
 		UserID:          request.UserID,
@@ -208,7 +232,7 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 		HandoffRequired: response.Handoff.Required,
 		HandoffReason:   response.Handoff.Reason,
 		LatencyMS:       elapsedMilliseconds(startedAt),
-		ModelUsed:       "mock",
+		ModelUsed:       "ai-service",
 	}); err != nil {
 		return SendMessageResponse{}, err
 	}
@@ -301,11 +325,130 @@ func (s *Service) ListKnowledge(ctx context.Context) ([]KnowledgeRecord, error) 
 }
 
 func (s *Service) CreateKnowledge(ctx context.Context, request KnowledgeRequest) (KnowledgeRecord, error) {
-	return s.store.CreateKnowledge(ctx, knowledgeRecordFromRequest(0, request))
+	record, err := s.store.CreateKnowledge(ctx, knowledgeRecordFromRequest(0, request))
+	if err != nil {
+		return KnowledgeRecord{}, err
+	}
+	if err := s.rebuildKnowledgeChunks(ctx, record); err != nil {
+		return KnowledgeRecord{}, err
+	}
+	return record, nil
 }
 
 func (s *Service) UpdateKnowledge(ctx context.Context, id int64, request KnowledgeRequest) (KnowledgeRecord, error) {
-	return s.store.UpdateKnowledge(ctx, knowledgeRecordFromRequest(id, request))
+	record, err := s.store.UpdateKnowledge(ctx, knowledgeRecordFromRequest(id, request))
+	if err != nil {
+		return KnowledgeRecord{}, err
+	}
+	if err := s.rebuildKnowledgeChunks(ctx, record); err != nil {
+		return KnowledgeRecord{}, err
+	}
+	return record, nil
+}
+
+func (s *Service) SyncKnowledgeChunks(ctx context.Context) (KnowledgeChunkSyncResult, error) {
+	knowledge, err := s.store.ListKnowledge(ctx)
+	if err != nil {
+		return KnowledgeChunkSyncResult{}, err
+	}
+
+	chunks := []KnowledgeChunkRecord{}
+	publishedCount := 0
+	for _, record := range knowledge {
+		if record.Status != "published" {
+			continue
+		}
+		publishedCount++
+		chunks = append(chunks, buildKnowledgeChunks(record)...)
+	}
+
+	if err := s.store.ReplaceKnowledgeChunks(ctx, chunks); err != nil {
+		return KnowledgeChunkSyncResult{}, err
+	}
+
+	vectorTotal, model, err := s.upsertKnowledgeChunks(ctx, chunks)
+	if err != nil {
+		return KnowledgeChunkSyncResult{}, err
+	}
+	return KnowledgeChunkSyncResult{
+		KnowledgeTotal: publishedCount,
+		ChunkTotal:     len(chunks),
+		VectorTotal:    vectorTotal,
+		Model:          model,
+	}, nil
+}
+
+func (s *Service) rebuildKnowledgeChunks(ctx context.Context, record KnowledgeRecord) error {
+	chunks := []KnowledgeChunkRecord{}
+	if record.Status == "published" {
+		chunks = buildKnowledgeChunks(record)
+	}
+	if err := s.store.ReplaceKnowledgeChunksByKnowledgeID(ctx, record.KnowledgeID, chunks); err != nil {
+		return err
+	}
+	_, _, err := s.upsertKnowledgeChunks(ctx, chunks)
+	return err
+}
+
+func (s *Service) upsertKnowledgeChunks(ctx context.Context, chunks []KnowledgeChunkRecord) (int, string, error) {
+	if len(chunks) == 0 {
+		return 0, "", nil
+	}
+
+	vectorChunks := make([]ai.VectorChunk, 0, len(chunks))
+	for _, chunk := range chunks {
+		vectorChunks = append(vectorChunks, ai.VectorChunk{
+			ChunkID:     chunk.ChunkID,
+			KnowledgeID: chunk.KnowledgeID,
+			ChunkText:   chunk.ChunkText,
+		})
+	}
+
+	response, err := s.aiClient.UpsertVectors(ctx, ai.VectorUpsertRequest{Chunks: vectorChunks})
+	if err != nil {
+		return 0, "", err
+	}
+
+	vectorIDs := map[string]string{}
+	for _, item := range response.Items {
+		vectorIDs[item.ChunkID] = item.VectorID
+	}
+	if err := s.store.UpdateKnowledgeChunkVectorIDs(ctx, vectorIDs); err != nil {
+		return 0, "", err
+	}
+	return len(response.Items), response.Model, nil
+}
+
+func (s *Service) SearchRAG(ctx context.Context, query string, topK int) (RAGSearchResult, bool, error) {
+	response, err := s.aiClient.SearchVectors(ctx, ai.VectorSearchRequest{Query: query, TopK: topK})
+	if err != nil {
+		return RAGSearchResult{}, false, err
+	}
+	if len(response.Items) == 0 || response.Items[0].Score < 0.78 {
+		return RAGSearchResult{}, false, nil
+	}
+
+	chunkIDs := make([]string, 0, len(response.Items))
+	scores := map[string]float64{}
+	chunkText := map[string]string{}
+	for _, item := range response.Items {
+		chunkIDs = append(chunkIDs, item.ChunkID)
+		scores[item.ChunkID] = item.Score
+		chunkText[item.ChunkID] = item.ChunkText
+	}
+	records, err := s.store.GetKnowledgeByChunkIDs(ctx, chunkIDs)
+	if err != nil {
+		return RAGSearchResult{}, false, err
+	}
+
+	best := response.Items[0].ChunkID
+	result, ok := records[best]
+	if !ok {
+		return RAGSearchResult{}, false, nil
+	}
+	result.Score = scores[best]
+	result.ChunkText = firstNonEmpty(chunkText[best], result.ChunkText)
+	return result, true, nil
 }
 
 func (s *Service) ListRAGEvalCases(ctx context.Context) ([]RAGEvalCaseRecord, error) {
@@ -420,6 +563,13 @@ func handoffDecision(required bool, reason string) HandoffDecision {
 	return HandoffDecision{Required: true, Reason: reason}
 }
 
+func ragReply(result RAGSearchResult) string {
+	if result.Content != "" {
+		return result.Content
+	}
+	return result.ChunkText
+}
+
 func firstNonEmpty(value string, fallback string) string {
 	if value != "" {
 		return value
@@ -450,6 +600,64 @@ func knowledgeRecordFromRequest(id int64, request KnowledgeRequest) KnowledgeRec
 		Version:     request.Version,
 		Status:      request.Status,
 	}
+}
+
+func buildKnowledgeChunks(record KnowledgeRecord) []KnowledgeChunkRecord {
+	const maxChunkRunes = 500
+	const overlapRunes = 80
+
+	text := normalizeKnowledgeText(record.Title, record.Content)
+	runes := []rune(text)
+	if len(runes) == 0 {
+		return []KnowledgeChunkRecord{}
+	}
+
+	chunks := []KnowledgeChunkRecord{}
+	for start := 0; start < len(runes); {
+		end := start + maxChunkRunes
+		if end > len(runes) {
+			end = len(runes)
+		}
+		chunkText := strings.TrimSpace(string(runes[start:end]))
+		if chunkText != "" {
+			index := len(chunks) + 1
+			chunks = append(chunks, KnowledgeChunkRecord{
+				ChunkID:     fmt.Sprintf("%s_%s_%03d", record.KnowledgeID, record.Version, index),
+				KnowledgeID: record.KnowledgeID,
+				Version:     record.Version,
+				ChunkText:   chunkText,
+				TokenCount:  estimateTokenCount(chunkText),
+			})
+		}
+		if end == len(runes) {
+			break
+		}
+		start = end - overlapRunes
+		if start < 0 {
+			start = end
+		}
+	}
+	return chunks
+}
+
+func normalizeKnowledgeText(title string, content string) string {
+	title = strings.TrimSpace(title)
+	content = strings.TrimSpace(content)
+	if title == "" {
+		return "内容：" + content
+	}
+	if content == "" {
+		return "标题：" + title
+	}
+	return "标题：" + title + "\n内容：" + content
+}
+
+func estimateTokenCount(text string) int {
+	count := utf8.RuneCountInString(text)
+	if count == 0 {
+		return 0
+	}
+	return (count + 1) / 2
 }
 
 func ragEvalCaseRecordFromRequest(id int64, request RAGEvalCaseRequest) RAGEvalCaseRecord {

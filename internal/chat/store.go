@@ -88,6 +88,31 @@ type KnowledgeRecord struct {
 	Status      string `json:"status"`
 }
 
+type KnowledgeChunkRecord struct {
+	ChunkID     string `json:"chunk_id"`
+	KnowledgeID string `json:"knowledge_id"`
+	Version     string `json:"version"`
+	ChunkText   string `json:"chunk_text"`
+	TokenCount  int    `json:"token_count"`
+	VectorID    string `json:"vector_id"`
+}
+
+type KnowledgeChunkSyncResult struct {
+	KnowledgeTotal int    `json:"knowledge_total"`
+	ChunkTotal     int    `json:"chunk_total"`
+	VectorTotal    int    `json:"vector_total"`
+	Model          string `json:"model"`
+}
+
+type RAGSearchResult struct {
+	ChunkID     string  `json:"chunk_id"`
+	KnowledgeID string  `json:"knowledge_id"`
+	Title       string  `json:"title"`
+	Content     string  `json:"content"`
+	Score       float64 `json:"score"`
+	ChunkText   string  `json:"chunk_text"`
+}
+
 type RAGEvalCaseRecord struct {
 	ID                  int64  `json:"id"`
 	CaseID              string `json:"case_id"`
@@ -115,6 +140,11 @@ type Store interface {
 	ListKnowledge(ctx context.Context) ([]KnowledgeRecord, error)
 	CreateKnowledge(ctx context.Context, record KnowledgeRecord) (KnowledgeRecord, error)
 	UpdateKnowledge(ctx context.Context, record KnowledgeRecord) (KnowledgeRecord, error)
+	ReplaceKnowledgeChunks(ctx context.Context, records []KnowledgeChunkRecord) error
+	ReplaceKnowledgeChunksByKnowledgeID(ctx context.Context, knowledgeID string, records []KnowledgeChunkRecord) error
+	ListKnowledgeChunksWithoutVector(ctx context.Context) ([]KnowledgeChunkRecord, error)
+	UpdateKnowledgeChunkVectorIDs(ctx context.Context, vectorIDs map[string]string) error
+	GetKnowledgeByChunkIDs(ctx context.Context, chunkIDs []string) (map[string]RAGSearchResult, error)
 	ListRAGEvalCases(ctx context.Context) ([]RAGEvalCaseRecord, error)
 	CreateRAGEvalCase(ctx context.Context, record RAGEvalCaseRecord) (RAGEvalCaseRecord, error)
 	UpdateRAGEvalCase(ctx context.Context, record RAGEvalCaseRecord) (RAGEvalCaseRecord, error)
@@ -187,6 +217,26 @@ func (NoopStore) CreateKnowledge(ctx context.Context, record KnowledgeRecord) (K
 
 func (NoopStore) UpdateKnowledge(ctx context.Context, record KnowledgeRecord) (KnowledgeRecord, error) {
 	return record, nil
+}
+
+func (NoopStore) ReplaceKnowledgeChunks(ctx context.Context, records []KnowledgeChunkRecord) error {
+	return nil
+}
+
+func (NoopStore) ReplaceKnowledgeChunksByKnowledgeID(ctx context.Context, knowledgeID string, records []KnowledgeChunkRecord) error {
+	return nil
+}
+
+func (NoopStore) ListKnowledgeChunksWithoutVector(ctx context.Context) ([]KnowledgeChunkRecord, error) {
+	return []KnowledgeChunkRecord{}, nil
+}
+
+func (NoopStore) UpdateKnowledgeChunkVectorIDs(ctx context.Context, vectorIDs map[string]string) error {
+	return nil
+}
+
+func (NoopStore) GetKnowledgeByChunkIDs(ctx context.Context, chunkIDs []string) (map[string]RAGSearchResult, error) {
+	return map[string]RAGSearchResult{}, nil
 }
 
 func (NoopStore) ListRAGEvalCases(ctx context.Context) ([]RAGEvalCaseRecord, error) {

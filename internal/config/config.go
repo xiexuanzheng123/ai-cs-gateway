@@ -6,22 +6,24 @@ import (
 )
 
 type Config struct {
-	HTTPAddr         string
-	AIServiceBaseURL string
-	MySQLDSN         string
-	RedisAddr        string
-	RedisPassword    string
-	RedisDB          int
+	HTTPAddr                string
+	AIServiceBaseURL        string
+	AIServiceTimeoutSeconds int
+	MySQLDSN                string
+	RedisAddr               string
+	RedisPassword           string
+	RedisDB                 int
 }
 
 func Load() Config {
 	return Config{
-		HTTPAddr:         env("HTTP_ADDR", ":8080"),
-		AIServiceBaseURL: env("AI_SERVICE_BASE_URL", "http://localhost:8000"),
-		MySQLDSN:         os.Getenv("MYSQL_DSN"),
-		RedisAddr:        os.Getenv("REDIS_ADDR"),
-		RedisPassword:    os.Getenv("REDIS_PASSWORD"),
-		RedisDB:          envInt("REDIS_DB", 0),
+		HTTPAddr:                env("HTTP_ADDR", ":8080"),
+		AIServiceBaseURL:        env("AI_SERVICE_BASE_URL", "http://localhost:8000"),
+		AIServiceTimeoutSeconds: envInt("AI_SERVICE_TIMEOUT_SECONDS", 10),
+		MySQLDSN:                os.Getenv("MYSQL_DSN"),
+		RedisAddr:               os.Getenv("REDIS_ADDR"),
+		RedisPassword:           os.Getenv("REDIS_PASSWORD"),
+		RedisDB:                 envInt("REDIS_DB", 0),
 	}
 }
 

@@ -36,6 +36,45 @@ type ReplyResponse struct {
 	Suggestions     []string `json:"suggestions"`
 }
 
+type VectorChunk struct {
+	ChunkID     string `json:"chunk_id"`
+	KnowledgeID string `json:"knowledge_id"`
+	ChunkText   string `json:"chunk_text"`
+}
+
+type VectorUpsertRequest struct {
+	Chunks []VectorChunk `json:"chunks"`
+}
+
+type VectorUpsertItem struct {
+	ChunkID  string `json:"chunk_id"`
+	VectorID string `json:"vector_id"`
+}
+
+type VectorUpsertResponse struct {
+	Items     []VectorUpsertItem `json:"items"`
+	Dimension int                `json:"dimension"`
+	Model     string             `json:"model"`
+}
+
+type VectorSearchRequest struct {
+	Query string `json:"query"`
+	TopK  int    `json:"top_k"`
+}
+
+type VectorSearchItem struct {
+	ChunkID     string  `json:"chunk_id"`
+	KnowledgeID string  `json:"knowledge_id"`
+	Score       float64 `json:"score"`
+	ChunkText   string  `json:"chunk_text"`
+}
+
+type VectorSearchResponse struct {
+	Items     []VectorSearchItem `json:"items"`
+	Dimension int                `json:"dimension"`
+	Model     string             `json:"model"`
+}
+
 func NewClient(baseURL string, timeout time.Duration) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
@@ -46,36 +85,58 @@ func NewClient(baseURL string, timeout time.Duration) *Client {
 }
 
 func (c *Client) Reply(ctx context.Context, request ReplyRequest) (ReplyResponse, error) {
+	var response ReplyResponse
+	if err := c.post(ctx, "/v1/ai/reply", request, &response); err != nil {
+		return ReplyResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) UpsertVectors(ctx context.Context, request VectorUpsertRequest) (VectorUpsertResponse, error) {
+	var response VectorUpsertResponse
+	if err := c.post(ctx, "/vector/chunks/upsert", request, &response); err != nil {
+		return VectorUpsertResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) SearchVectors(ctx context.Context, request VectorSearchRequest) (VectorSearchResponse, error) {
+	var response VectorSearchResponse
+	if err := c.post(ctx, "/vector/search", request, &response); err != nil {
+		return VectorSearchResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) post(ctx context.Context, path string, request any, response any) error {
 	body, err := json.Marshal(request)
 	if err != nil {
-		return ReplyResponse{}, fmt.Errorf("marshal ai request: %w", err)
+		return fmt.Errorf("marshal ai request: %w", err)
 	}
 
 	httpRequest, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
-		c.baseURL+"/v1/ai/reply",
+		c.baseURL+path,
 		bytes.NewReader(body),
 	)
 	if err != nil {
-		return ReplyResponse{}, fmt.Errorf("build ai request: %w", err)
+		return fmt.Errorf("build ai request: %w", err)
 	}
 	httpRequest.Header.Set("Content-Type", "application/json")
 
 	httpResponse, err := c.httpClient.Do(httpRequest)
 	if err != nil {
-		return ReplyResponse{}, fmt.Errorf("call ai service: %w", err)
+		return fmt.Errorf("call ai service: %w", err)
 	}
 	defer httpResponse.Body.Close()
 
 	if httpResponse.StatusCode < 200 || httpResponse.StatusCode >= 300 {
-		return ReplyResponse{}, fmt.Errorf("ai service returned status %d", httpResponse.StatusCode)
+		return fmt.Errorf("ai service returned status %d", httpResponse.StatusCode)
 	}
 
-	var response ReplyResponse
 	if err := json.NewDecoder(httpResponse.Body).Decode(&response); err != nil {
-		return ReplyResponse{}, fmt.Errorf("decode ai response: %w", err)
+		return fmt.Errorf("decode ai response: %w", err)
 	}
-
-	return response, nil
+	return nil
 }

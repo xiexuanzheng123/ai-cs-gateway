@@ -206,6 +206,39 @@ func (h *Handler) UpdateKnowledge(c *gin.Context) {
 	c.JSON(http.StatusOK, record)
 }
 
+func (h *Handler) SyncKnowledgeChunks(c *gin.Context) {
+	result, err := h.service.SyncKnowledgeChunks(c.Request.Context())
+	if err != nil {
+		writeUpstreamError(c, "sync_knowledge_chunks_failed", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *Handler) SearchRAG(c *gin.Context) {
+	var request RAGSearchRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		writeBadRequest(c, "invalid_rag_search_request", err)
+		return
+	}
+	topK := request.TopK
+	if topK <= 0 {
+		topK = 3
+	}
+
+	result, matched, err := h.service.SearchRAG(c.Request.Context(), request.Query, topK)
+	if err != nil {
+		writeUpstreamError(c, "rag_search_failed", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"matched": matched,
+		"result":  result,
+	})
+}
+
 func (h *Handler) ListRAGEvalCases(c *gin.Context) {
 	records, err := h.service.ListRAGEvalCases(c.Request.Context())
 	if err != nil {

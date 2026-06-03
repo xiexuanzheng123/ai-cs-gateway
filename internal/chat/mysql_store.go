@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 type MySQLStore struct {
@@ -404,6 +405,167 @@ func (s *MySQLStore) UpdateKnowledge(ctx context.Context, record KnowledgeRecord
 		return KnowledgeRecord{}, fmt.Errorf("knowledge not found")
 	}
 	return record, nil
+}
+
+func (s *MySQLStore) ReplaceKnowledgeChunks(ctx context.Context, records []KnowledgeChunkRecord) error {
+	return s.replaceKnowledgeChunks(ctx, "", records)
+}
+
+func (s *MySQLStore) ReplaceKnowledgeChunksByKnowledgeID(ctx context.Context, knowledgeID string, records []KnowledgeChunkRecord) error {
+	return s.replaceKnowledgeChunks(ctx, knowledgeID, records)
+}
+
+func (s *MySQLStore) replaceKnowledgeChunks(ctx context.Context, knowledgeID string, records []KnowledgeChunkRecord) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin replace knowledge chunks: %w", err)
+	}
+	defer tx.Rollback()
+
+	if knowledgeID == "" {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM cs_knowledge_chunk`); err != nil {
+			return fmt.Errorf("clear knowledge chunks: %w", err)
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM cs_knowledge_chunk WHERE knowledge_id = ?`, knowledgeID); err != nil {
+			return fmt.Errorf("clear knowledge chunks by knowledge id: %w", err)
+		}
+	}
+
+	stmt, err := tx.PrepareContext(
+		ctx,
+		`INSERT INTO cs_knowledge_chunk
+		 (chunk_id, knowledge_id, version, chunk_text, token_count, vector_id)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+	)
+	if err != nil {
+		return fmt.Errorf("prepare knowledge chunk insert: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, record := range records {
+		if _, err := stmt.ExecContext(
+			ctx,
+			record.ChunkID,
+			record.KnowledgeID,
+			record.Version,
+			record.ChunkText,
+			record.TokenCount,
+			record.VectorID,
+		); err != nil {
+			return fmt.Errorf("insert knowledge chunk: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit knowledge chunks: %w", err)
+	}
+	return nil
+}
+
+func (s *MySQLStore) ListKnowledgeChunksWithoutVector(ctx context.Context) ([]KnowledgeChunkRecord, error) {
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT chunk_id, knowledge_id, version, chunk_text, token_count, COALESCE(vector_id, '')
+		 FROM cs_knowledge_chunk
+		 WHERE vector_id IS NULL OR vector_id = ''
+		 ORDER BY id`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list knowledge chunks without vector: %w", err)
+	}
+	defer rows.Close()
+
+	records := []KnowledgeChunkRecord{}
+	for rows.Next() {
+		var record KnowledgeChunkRecord
+		if err := rows.Scan(
+			&record.ChunkID,
+			&record.KnowledgeID,
+			&record.Version,
+			&record.ChunkText,
+			&record.TokenCount,
+			&record.VectorID,
+		); err != nil {
+			return nil, fmt.Errorf("scan knowledge chunk: %w", err)
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate knowledge chunks: %w", err)
+	}
+	return records, nil
+}
+
+func (s *MySQLStore) UpdateKnowledgeChunkVectorIDs(ctx context.Context, vectorIDs map[string]string) error {
+	if len(vectorIDs) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin update vector ids: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, `UPDATE cs_knowledge_chunk SET vector_id = ? WHERE chunk_id = ?`)
+	if err != nil {
+		return fmt.Errorf("prepare update vector id: %w", err)
+	}
+	defer stmt.Close()
+
+	for chunkID, vectorID := range vectorIDs {
+		if _, err := stmt.ExecContext(ctx, vectorID, chunkID); err != nil {
+			return fmt.Errorf("update vector id: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit vector ids: %w", err)
+	}
+	return nil
+}
+
+func (s *MySQLStore) GetKnowledgeByChunkIDs(ctx context.Context, chunkIDs []string) (map[string]RAGSearchResult, error) {
+	if len(chunkIDs) == 0 {
+		return map[string]RAGSearchResult{}, nil
+	}
+
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(chunkIDs)), ",")
+	args := make([]any, 0, len(chunkIDs))
+	for _, chunkID := range chunkIDs {
+		args = append(args, chunkID)
+	}
+
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT c.chunk_id, c.knowledge_id, k.title, k.content, c.chunk_text
+		 FROM cs_knowledge_chunk c
+		 JOIN cs_knowledge k ON k.knowledge_id = c.knowledge_id
+		 WHERE c.chunk_id IN (`+placeholders+`)`,
+		args...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get knowledge by chunk ids: %w", err)
+	}
+	defer rows.Close()
+
+	records := map[string]RAGSearchResult{}
+	for rows.Next() {
+		var record RAGSearchResult
+		if err := rows.Scan(
+			&record.ChunkID,
+			&record.KnowledgeID,
+			&record.Title,
+			&record.Content,
+			&record.ChunkText,
+		); err != nil {
+			return nil, fmt.Errorf("scan rag knowledge: %w", err)
+		}
+		records[record.ChunkID] = record
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rag knowledge: %w", err)
+	}
+	return records, nil
 }
 
 func (s *MySQLStore) ListRAGEvalCases(ctx context.Context) ([]RAGEvalCaseRecord, error) {
