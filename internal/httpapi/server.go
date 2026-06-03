@@ -75,6 +75,9 @@ func NewServer(cfg config.Config) *gin.Engine {
 	router.POST("/api/customer-service/admin/rules", chatHandler.CreateRule)
 	router.PUT("/api/customer-service/admin/rules/:id", chatHandler.UpdateRule)
 	router.POST("/api/customer-service/admin/rules/reload", chatHandler.ReloadRules)
+	router.GET("/api/customer-service/admin/dashboard", chatHandler.Dashboard)
+	router.GET("/api/customer-service/admin/flags", chatHandler.ListFeatureFlags)
+	router.PUT("/api/customer-service/admin/flags/:key", chatHandler.SetFeatureFlag)
 
 	return router
 }

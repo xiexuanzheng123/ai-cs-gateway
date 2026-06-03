@@ -49,9 +49,12 @@ curl http://localhost:8080/api/customer-service/health
 curl -X POST http://localhost:8080/api/customer-service/chat \
   -H 'Content-Type: application/json' \
   -d '{
+    "conversation_id": "c_local",
     "user_id": "demo-user-001",
+    "message_id": "m_local",
+    "message_type": "text",
     "message": "密码错误太多怎么办",
-    "source": "h5",
+    "channel": "h5",
     "metadata": {
       "platform": "h5"
     }
@@ -66,10 +69,15 @@ curl -X POST http://localhost:8080/api/customer-service/handoff \
     "message_id": "message-local",
     "user_id": "demo-user-001",
     "reason": "user_requested",
-    "source": "h5"
+    "channel": "h5"
   }'
 ```
 
 ```bash
 curl http://localhost:8080/api/customer-service/admin/rules
+```
+
+```bash
+curl http://localhost:8080/api/customer-service/admin/dashboard
+curl http://localhost:8080/api/customer-service/admin/flags
 ```

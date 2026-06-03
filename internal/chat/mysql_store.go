@@ -217,3 +217,103 @@ func (s *MySQLStore) UpdateRule(ctx context.Context, record RuleConfigRecord) (R
 	}
 	return record, nil
 }
+
+func (s *MySQLStore) GetFeatureFlag(ctx context.Context, key string) (bool, error) {
+	var enabled bool
+	err := s.db.QueryRowContext(
+		ctx,
+		`SELECT enabled FROM cs_feature_flag WHERE flag_key = ?`,
+		key,
+	).Scan(&enabled)
+	if err == sql.ErrNoRows {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get feature flag: %w", err)
+	}
+	return enabled, nil
+}
+
+func (s *MySQLStore) ListFeatureFlags(ctx context.Context) ([]FeatureFlagRecord, error) {
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT flag_key, enabled, COALESCE(description, '')
+		 FROM cs_feature_flag
+		 ORDER BY id ASC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list feature flags: %w", err)
+	}
+	defer rows.Close()
+
+	flags := []FeatureFlagRecord{}
+	for rows.Next() {
+		var flag FeatureFlagRecord
+		if err := rows.Scan(&flag.Key, &flag.Enabled, &flag.Description); err != nil {
+			return nil, fmt.Errorf("scan feature flag: %w", err)
+		}
+		flags = append(flags, flag)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate feature flags: %w", err)
+	}
+	return flags, nil
+}
+
+func (s *MySQLStore) SetFeatureFlag(ctx context.Context, key string, enabled bool) (FeatureFlagRecord, error) {
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO cs_feature_flag (flag_key, enabled, description)
+		 VALUES (?, ?, '')
+		 ON DUPLICATE KEY UPDATE enabled = VALUES(enabled), updated_at = CURRENT_TIMESTAMP`,
+		key,
+		enabled,
+	)
+	if err != nil {
+		return FeatureFlagRecord{}, fmt.Errorf("set feature flag: %w", err)
+	}
+	var flag FeatureFlagRecord
+	err = s.db.QueryRowContext(
+		ctx,
+		`SELECT flag_key, enabled, COALESCE(description, '')
+		 FROM cs_feature_flag
+		 WHERE flag_key = ?`,
+		key,
+	).Scan(&flag.Key, &flag.Enabled, &flag.Description)
+	if err != nil {
+		return FeatureFlagRecord{}, fmt.Errorf("get updated feature flag: %w", err)
+	}
+	return flag, nil
+}
+
+func (s *MySQLStore) GetDashboardStats(ctx context.Context) (DashboardStats, error) {
+	var stats DashboardStats
+	queries := []struct {
+		name string
+		dest *int64
+		sql  string
+	}{
+		{name: "conversation count", dest: &stats.TotalConversations, sql: `SELECT COUNT(*) FROM cs_conversation`},
+		{name: "message count", dest: &stats.TotalMessages, sql: `SELECT COUNT(*) FROM cs_message`},
+		{name: "event count", dest: &stats.TotalAIEvents, sql: `SELECT COUNT(*) FROM cs_ai_event`},
+		{name: "rule hit count", dest: &stats.RuleHitCount, sql: `SELECT COUNT(*) FROM cs_ai_event WHERE route IN ('db_rule', 'fixed_faq', 'rule_handoff', 'media_guide', 'fixed_faq_fallback')`},
+		{name: "handoff count", dest: &stats.HandoffCount, sql: `SELECT COUNT(*) FROM cs_ai_event WHERE handoff_required = 1`},
+		{name: "feedback count", dest: &stats.FeedbackCount, sql: `SELECT COUNT(*) FROM cs_feedback`},
+		{name: "positive feedback", dest: &stats.PositiveFeedback, sql: `SELECT COUNT(*) FROM cs_feedback WHERE rating = 'thumbs_up'`},
+		{name: "negative feedback", dest: &stats.NegativeFeedback, sql: `SELECT COUNT(*) FROM cs_feedback WHERE rating = 'thumbs_down'`},
+	}
+	for _, query := range queries {
+		if err := s.db.QueryRowContext(ctx, query.sql).Scan(query.dest); err != nil {
+			return DashboardStats{}, fmt.Errorf("%s: %w", query.name, err)
+		}
+	}
+
+	var average sql.NullFloat64
+	if err := s.db.QueryRowContext(ctx, `SELECT AVG(latency_ms) FROM cs_ai_event WHERE latency_ms IS NOT NULL`).Scan(&average); err != nil {
+		return DashboardStats{}, fmt.Errorf("average latency: %w", err)
+	}
+	if average.Valid {
+		stats.AverageLatencyMS = average.Float64
+	}
+	return stats, nil
+}

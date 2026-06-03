@@ -119,3 +119,41 @@ func (h *Handler) ReloadRules(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }
+
+func (h *Handler) Dashboard(c *gin.Context) {
+	stats, err := h.service.GetDashboard(c.Request.Context())
+	if err != nil {
+		writeUpstreamError(c, "dashboard_failed", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, stats)
+}
+
+func (h *Handler) ListFeatureFlags(c *gin.Context) {
+	flags, err := h.service.ListFeatureFlags(c.Request.Context())
+	if err != nil {
+		writeUpstreamError(c, "list_flags_failed", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"flags": flags})
+}
+
+func (h *Handler) SetFeatureFlag(c *gin.Context) {
+	var request struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&request); err != nil {
+		writeBadRequest(c, "invalid_flag_request", err)
+		return
+	}
+
+	flag, err := h.service.SetFeatureFlag(c.Request.Context(), c.Param("key"), request.Enabled)
+	if err != nil {
+		writeUpstreamError(c, "set_flag_failed", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, flag)
+}

@@ -59,6 +59,24 @@ type RuleConfigRecord struct {
 	Description string `json:"description"`
 }
 
+type FeatureFlagRecord struct {
+	Key         string `json:"key"`
+	Enabled     bool   `json:"enabled"`
+	Description string `json:"description"`
+}
+
+type DashboardStats struct {
+	TotalConversations int64   `json:"total_conversations"`
+	TotalMessages      int64   `json:"total_messages"`
+	TotalAIEvents      int64   `json:"total_ai_events"`
+	RuleHitCount       int64   `json:"rule_hit_count"`
+	HandoffCount       int64   `json:"handoff_count"`
+	FeedbackCount      int64   `json:"feedback_count"`
+	PositiveFeedback   int64   `json:"positive_feedback"`
+	NegativeFeedback   int64   `json:"negative_feedback"`
+	AverageLatencyMS   float64 `json:"average_latency_ms"`
+}
+
 type Store interface {
 	SaveConversation(ctx context.Context, record ConversationRecord) error
 	SaveMessage(ctx context.Context, record MessageRecord) error
@@ -69,6 +87,10 @@ type Store interface {
 	ListEnabledRules(ctx context.Context) ([]RuleConfigRecord, error)
 	CreateRule(ctx context.Context, record RuleConfigRecord) (RuleConfigRecord, error)
 	UpdateRule(ctx context.Context, record RuleConfigRecord) (RuleConfigRecord, error)
+	GetFeatureFlag(ctx context.Context, key string) (bool, error)
+	ListFeatureFlags(ctx context.Context) ([]FeatureFlagRecord, error)
+	SetFeatureFlag(ctx context.Context, key string, enabled bool) (FeatureFlagRecord, error)
+	GetDashboardStats(ctx context.Context) (DashboardStats, error)
 }
 
 type NoopStore struct{}
@@ -108,4 +130,22 @@ func (NoopStore) CreateRule(ctx context.Context, record RuleConfigRecord) (RuleC
 
 func (NoopStore) UpdateRule(ctx context.Context, record RuleConfigRecord) (RuleConfigRecord, error) {
 	return record, nil
+}
+
+func (NoopStore) GetFeatureFlag(ctx context.Context, key string) (bool, error) {
+	return true, nil
+}
+
+func (NoopStore) ListFeatureFlags(ctx context.Context) ([]FeatureFlagRecord, error) {
+	return []FeatureFlagRecord{
+		{Key: "smart_reply_enabled", Enabled: true, Description: "智能回复总开关"},
+	}, nil
+}
+
+func (NoopStore) SetFeatureFlag(ctx context.Context, key string, enabled bool) (FeatureFlagRecord, error) {
+	return FeatureFlagRecord{Key: key, Enabled: enabled}, nil
+}
+
+func (NoopStore) GetDashboardStats(ctx context.Context) (DashboardStats, error) {
+	return DashboardStats{}, nil
 }
