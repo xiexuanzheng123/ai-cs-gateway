@@ -317,3 +317,177 @@ func (s *MySQLStore) GetDashboardStats(ctx context.Context) (DashboardStats, err
 	}
 	return stats, nil
 }
+
+func (s *MySQLStore) ListKnowledge(ctx context.Context) ([]KnowledgeRecord, error) {
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT id, knowledge_id, title, content, category, COALESCE(owner, ''), version, status
+		 FROM cs_knowledge
+		 ORDER BY updated_at DESC, id DESC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list knowledge: %w", err)
+	}
+	defer rows.Close()
+
+	records := []KnowledgeRecord{}
+	for rows.Next() {
+		var record KnowledgeRecord
+		if err := rows.Scan(
+			&record.ID,
+			&record.KnowledgeID,
+			&record.Title,
+			&record.Content,
+			&record.Category,
+			&record.Owner,
+			&record.Version,
+			&record.Status,
+		); err != nil {
+			return nil, fmt.Errorf("scan knowledge: %w", err)
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate knowledge: %w", err)
+	}
+	return records, nil
+}
+
+func (s *MySQLStore) CreateKnowledge(ctx context.Context, record KnowledgeRecord) (KnowledgeRecord, error) {
+	result, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO cs_knowledge
+		 (knowledge_id, title, content, category, owner, version, status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		record.KnowledgeID,
+		record.Title,
+		record.Content,
+		record.Category,
+		record.Owner,
+		record.Version,
+		record.Status,
+	)
+	if err != nil {
+		return KnowledgeRecord{}, fmt.Errorf("create knowledge: %w", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return KnowledgeRecord{}, fmt.Errorf("get knowledge id: %w", err)
+	}
+	record.ID = id
+	return record, nil
+}
+
+func (s *MySQLStore) UpdateKnowledge(ctx context.Context, record KnowledgeRecord) (KnowledgeRecord, error) {
+	result, err := s.db.ExecContext(
+		ctx,
+		`UPDATE cs_knowledge
+		 SET knowledge_id = ?, title = ?, content = ?, category = ?, owner = ?, version = ?, status = ?
+		 WHERE id = ?`,
+		record.KnowledgeID,
+		record.Title,
+		record.Content,
+		record.Category,
+		record.Owner,
+		record.Version,
+		record.Status,
+		record.ID,
+	)
+	if err != nil {
+		return KnowledgeRecord{}, fmt.Errorf("update knowledge: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return KnowledgeRecord{}, fmt.Errorf("get knowledge affected rows: %w", err)
+	}
+	if affected == 0 {
+		return KnowledgeRecord{}, fmt.Errorf("knowledge not found")
+	}
+	return record, nil
+}
+
+func (s *MySQLStore) ListRAGEvalCases(ctx context.Context) ([]RAGEvalCaseRecord, error) {
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT id, case_id, query_text, COALESCE(expected_knowledge_id, ''),
+		        COALESCE(expected_intent, ''), should_answer, status
+		 FROM cs_rag_eval_case
+		 ORDER BY updated_at DESC, id DESC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list rag eval cases: %w", err)
+	}
+	defer rows.Close()
+
+	records := []RAGEvalCaseRecord{}
+	for rows.Next() {
+		var record RAGEvalCaseRecord
+		if err := rows.Scan(
+			&record.ID,
+			&record.CaseID,
+			&record.QueryText,
+			&record.ExpectedKnowledgeID,
+			&record.ExpectedIntent,
+			&record.ShouldAnswer,
+			&record.Status,
+		); err != nil {
+			return nil, fmt.Errorf("scan rag eval case: %w", err)
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rag eval cases: %w", err)
+	}
+	return records, nil
+}
+
+func (s *MySQLStore) CreateRAGEvalCase(ctx context.Context, record RAGEvalCaseRecord) (RAGEvalCaseRecord, error) {
+	result, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO cs_rag_eval_case
+		 (case_id, query_text, expected_knowledge_id, expected_intent, should_answer, status)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		record.CaseID,
+		record.QueryText,
+		record.ExpectedKnowledgeID,
+		record.ExpectedIntent,
+		record.ShouldAnswer,
+		record.Status,
+	)
+	if err != nil {
+		return RAGEvalCaseRecord{}, fmt.Errorf("create rag eval case: %w", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return RAGEvalCaseRecord{}, fmt.Errorf("get rag eval case id: %w", err)
+	}
+	record.ID = id
+	return record, nil
+}
+
+func (s *MySQLStore) UpdateRAGEvalCase(ctx context.Context, record RAGEvalCaseRecord) (RAGEvalCaseRecord, error) {
+	result, err := s.db.ExecContext(
+		ctx,
+		`UPDATE cs_rag_eval_case
+		 SET case_id = ?, query_text = ?, expected_knowledge_id = ?, expected_intent = ?, should_answer = ?, status = ?
+		 WHERE id = ?`,
+		record.CaseID,
+		record.QueryText,
+		record.ExpectedKnowledgeID,
+		record.ExpectedIntent,
+		record.ShouldAnswer,
+		record.Status,
+		record.ID,
+	)
+	if err != nil {
+		return RAGEvalCaseRecord{}, fmt.Errorf("update rag eval case: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return RAGEvalCaseRecord{}, fmt.Errorf("get rag eval case affected rows: %w", err)
+	}
+	if affected == 0 {
+		return RAGEvalCaseRecord{}, fmt.Errorf("rag eval case not found")
+	}
+	return record, nil
+}

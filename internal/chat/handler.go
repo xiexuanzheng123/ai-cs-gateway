@@ -157,3 +157,99 @@ func (h *Handler) SetFeatureFlag(c *gin.Context) {
 
 	c.JSON(http.StatusOK, flag)
 }
+
+func (h *Handler) ListKnowledge(c *gin.Context) {
+	records, err := h.service.ListKnowledge(c.Request.Context())
+	if err != nil {
+		writeUpstreamError(c, "list_knowledge_failed", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"knowledge": records})
+}
+
+func (h *Handler) CreateKnowledge(c *gin.Context) {
+	var request KnowledgeRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		writeBadRequest(c, "invalid_knowledge_request", err)
+		return
+	}
+
+	record, err := h.service.CreateKnowledge(c.Request.Context(), request)
+	if err != nil {
+		writeUpstreamError(c, "create_knowledge_failed", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, record)
+}
+
+func (h *Handler) UpdateKnowledge(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeBadRequest(c, "invalid_knowledge_id", nil)
+		return
+	}
+
+	var request KnowledgeRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		writeBadRequest(c, "invalid_knowledge_request", err)
+		return
+	}
+
+	record, err := h.service.UpdateKnowledge(c.Request.Context(), id, request)
+	if err != nil {
+		writeUpstreamError(c, "update_knowledge_failed", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, record)
+}
+
+func (h *Handler) ListRAGEvalCases(c *gin.Context) {
+	records, err := h.service.ListRAGEvalCases(c.Request.Context())
+	if err != nil {
+		writeUpstreamError(c, "list_rag_eval_cases_failed", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"cases": records})
+}
+
+func (h *Handler) CreateRAGEvalCase(c *gin.Context) {
+	var request RAGEvalCaseRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		writeBadRequest(c, "invalid_rag_eval_case_request", err)
+		return
+	}
+
+	record, err := h.service.CreateRAGEvalCase(c.Request.Context(), request)
+	if err != nil {
+		writeUpstreamError(c, "create_rag_eval_case_failed", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, record)
+}
+
+func (h *Handler) UpdateRAGEvalCase(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeBadRequest(c, "invalid_rag_eval_case_id", nil)
+		return
+	}
+
+	var request RAGEvalCaseRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		writeBadRequest(c, "invalid_rag_eval_case_request", err)
+		return
+	}
+
+	record, err := h.service.UpdateRAGEvalCase(c.Request.Context(), id, request)
+	if err != nil {
+		writeUpstreamError(c, "update_rag_eval_case_failed", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, record)
+}

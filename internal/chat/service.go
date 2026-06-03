@@ -80,6 +80,25 @@ type RuleConfigRequest struct {
 	Description string `json:"description"`
 }
 
+type KnowledgeRequest struct {
+	KnowledgeID string `json:"knowledge_id" binding:"required"`
+	Title       string `json:"title" binding:"required"`
+	Content     string `json:"content" binding:"required"`
+	Category    string `json:"category" binding:"required"`
+	Owner       string `json:"owner"`
+	Version     string `json:"version" binding:"required"`
+	Status      string `json:"status" binding:"required"`
+}
+
+type RAGEvalCaseRequest struct {
+	CaseID              string `json:"case_id" binding:"required"`
+	QueryText           string `json:"query_text" binding:"required"`
+	ExpectedKnowledgeID string `json:"expected_knowledge_id"`
+	ExpectedIntent      string `json:"expected_intent"`
+	ShouldAnswer        bool   `json:"should_answer"`
+	Status              string `json:"status" binding:"required"`
+}
+
 type Service struct {
 	aiClient      AIClient
 	riskRouter    *routing.RiskRouter
@@ -277,6 +296,30 @@ func (s *Service) SetFeatureFlag(ctx context.Context, key string, enabled bool) 
 	return s.store.SetFeatureFlag(ctx, key, enabled)
 }
 
+func (s *Service) ListKnowledge(ctx context.Context) ([]KnowledgeRecord, error) {
+	return s.store.ListKnowledge(ctx)
+}
+
+func (s *Service) CreateKnowledge(ctx context.Context, request KnowledgeRequest) (KnowledgeRecord, error) {
+	return s.store.CreateKnowledge(ctx, knowledgeRecordFromRequest(0, request))
+}
+
+func (s *Service) UpdateKnowledge(ctx context.Context, id int64, request KnowledgeRequest) (KnowledgeRecord, error) {
+	return s.store.UpdateKnowledge(ctx, knowledgeRecordFromRequest(id, request))
+}
+
+func (s *Service) ListRAGEvalCases(ctx context.Context) ([]RAGEvalCaseRecord, error) {
+	return s.store.ListRAGEvalCases(ctx)
+}
+
+func (s *Service) CreateRAGEvalCase(ctx context.Context, request RAGEvalCaseRequest) (RAGEvalCaseRecord, error) {
+	return s.store.CreateRAGEvalCase(ctx, ragEvalCaseRecordFromRequest(0, request))
+}
+
+func (s *Service) UpdateRAGEvalCase(ctx context.Context, id int64, request RAGEvalCaseRequest) (RAGEvalCaseRecord, error) {
+	return s.store.UpdateRAGEvalCase(ctx, ragEvalCaseRecordFromRequest(id, request))
+}
+
 func (s *Service) matchRule(message string) (routing.RiskResult, bool) {
 	if result, matched := s.dynamicRouter.Match(message); matched {
 		return result, true
@@ -393,6 +436,31 @@ func ruleRecordFromRequest(id int64, request RuleConfigRequest) RuleConfigRecord
 		Priority:    request.Priority,
 		Enabled:     request.Enabled,
 		Description: request.Description,
+	}
+}
+
+func knowledgeRecordFromRequest(id int64, request KnowledgeRequest) KnowledgeRecord {
+	return KnowledgeRecord{
+		ID:          id,
+		KnowledgeID: request.KnowledgeID,
+		Title:       request.Title,
+		Content:     request.Content,
+		Category:    request.Category,
+		Owner:       request.Owner,
+		Version:     request.Version,
+		Status:      request.Status,
+	}
+}
+
+func ragEvalCaseRecordFromRequest(id int64, request RAGEvalCaseRequest) RAGEvalCaseRecord {
+	return RAGEvalCaseRecord{
+		ID:                  id,
+		CaseID:              request.CaseID,
+		QueryText:           request.QueryText,
+		ExpectedKnowledgeID: request.ExpectedKnowledgeID,
+		ExpectedIntent:      request.ExpectedIntent,
+		ShouldAnswer:        request.ShouldAnswer,
+		Status:              request.Status,
 	}
 }
 

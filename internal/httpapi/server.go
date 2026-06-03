@@ -78,6 +78,12 @@ func NewServer(cfg config.Config) *gin.Engine {
 	router.GET("/api/customer-service/admin/dashboard", chatHandler.Dashboard)
 	router.GET("/api/customer-service/admin/flags", chatHandler.ListFeatureFlags)
 	router.PUT("/api/customer-service/admin/flags/:key", chatHandler.SetFeatureFlag)
+	router.GET("/api/customer-service/admin/knowledge", chatHandler.ListKnowledge)
+	router.POST("/api/customer-service/admin/knowledge", chatHandler.CreateKnowledge)
+	router.PUT("/api/customer-service/admin/knowledge/:id", chatHandler.UpdateKnowledge)
+	router.GET("/api/customer-service/admin/rag-eval-cases", chatHandler.ListRAGEvalCases)
+	router.POST("/api/customer-service/admin/rag-eval-cases", chatHandler.CreateRAGEvalCase)
+	router.PUT("/api/customer-service/admin/rag-eval-cases/:id", chatHandler.UpdateRAGEvalCase)
 
 	return router
 }

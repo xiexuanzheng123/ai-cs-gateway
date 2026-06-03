@@ -77,6 +77,27 @@ type DashboardStats struct {
 	AverageLatencyMS   float64 `json:"average_latency_ms"`
 }
 
+type KnowledgeRecord struct {
+	ID          int64  `json:"id"`
+	KnowledgeID string `json:"knowledge_id"`
+	Title       string `json:"title"`
+	Content     string `json:"content"`
+	Category    string `json:"category"`
+	Owner       string `json:"owner"`
+	Version     string `json:"version"`
+	Status      string `json:"status"`
+}
+
+type RAGEvalCaseRecord struct {
+	ID                  int64  `json:"id"`
+	CaseID              string `json:"case_id"`
+	QueryText           string `json:"query_text"`
+	ExpectedKnowledgeID string `json:"expected_knowledge_id"`
+	ExpectedIntent      string `json:"expected_intent"`
+	ShouldAnswer        bool   `json:"should_answer"`
+	Status              string `json:"status"`
+}
+
 type Store interface {
 	SaveConversation(ctx context.Context, record ConversationRecord) error
 	SaveMessage(ctx context.Context, record MessageRecord) error
@@ -91,6 +112,12 @@ type Store interface {
 	ListFeatureFlags(ctx context.Context) ([]FeatureFlagRecord, error)
 	SetFeatureFlag(ctx context.Context, key string, enabled bool) (FeatureFlagRecord, error)
 	GetDashboardStats(ctx context.Context) (DashboardStats, error)
+	ListKnowledge(ctx context.Context) ([]KnowledgeRecord, error)
+	CreateKnowledge(ctx context.Context, record KnowledgeRecord) (KnowledgeRecord, error)
+	UpdateKnowledge(ctx context.Context, record KnowledgeRecord) (KnowledgeRecord, error)
+	ListRAGEvalCases(ctx context.Context) ([]RAGEvalCaseRecord, error)
+	CreateRAGEvalCase(ctx context.Context, record RAGEvalCaseRecord) (RAGEvalCaseRecord, error)
+	UpdateRAGEvalCase(ctx context.Context, record RAGEvalCaseRecord) (RAGEvalCaseRecord, error)
 }
 
 type NoopStore struct{}
@@ -148,4 +175,28 @@ func (NoopStore) SetFeatureFlag(ctx context.Context, key string, enabled bool) (
 
 func (NoopStore) GetDashboardStats(ctx context.Context) (DashboardStats, error) {
 	return DashboardStats{}, nil
+}
+
+func (NoopStore) ListKnowledge(ctx context.Context) ([]KnowledgeRecord, error) {
+	return []KnowledgeRecord{}, nil
+}
+
+func (NoopStore) CreateKnowledge(ctx context.Context, record KnowledgeRecord) (KnowledgeRecord, error) {
+	return record, nil
+}
+
+func (NoopStore) UpdateKnowledge(ctx context.Context, record KnowledgeRecord) (KnowledgeRecord, error) {
+	return record, nil
+}
+
+func (NoopStore) ListRAGEvalCases(ctx context.Context) ([]RAGEvalCaseRecord, error) {
+	return []RAGEvalCaseRecord{}, nil
+}
+
+func (NoopStore) CreateRAGEvalCase(ctx context.Context, record RAGEvalCaseRecord) (RAGEvalCaseRecord, error) {
+	return record, nil
+}
+
+func (NoopStore) UpdateRAGEvalCase(ctx context.Context, record RAGEvalCaseRecord) (RAGEvalCaseRecord, error) {
+	return record, nil
 }
