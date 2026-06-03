@@ -11,11 +11,13 @@ Go HTTP gateway for H5 and future native client robot entry.
 
 ## Run
 
-先启动 devops 里的 MySQL（与下方 DSN 账号一致）：
+推荐从 workspace 根目录按统一顺序启动，见 `../README.md`。
+
+单独启动 gateway 前，至少需要 devops 里的 MySQL 和 Redis 已运行：
 
 ```bash
 cd ../ai-cs-devops
-docker compose up -d mysql
+docker compose up -d mysql redis
 ```
 
 再启动 gateway（会读取项目根目录 `.env`）：
@@ -40,6 +42,8 @@ MYSQL_DSN=ai_cs:ai_cs_pass@tcp(127.0.0.1:3306)/ai_customer_service?parseTime=tru
 未设置 `MYSQL_DSN` 时仍可启动，但不会持久化会话（使用内存 NoopStore）。
 
 ## API
+
+### Stable chat contract
 
 ```bash
 curl http://localhost:8080/api/customer-service/health
@@ -80,4 +84,12 @@ curl http://localhost:8080/api/customer-service/admin/rules
 ```bash
 curl http://localhost:8080/api/customer-service/admin/dashboard
 curl http://localhost:8080/api/customer-service/admin/flags
+```
+
+## P0 Regression
+
+Gateway 启动后执行：
+
+```bash
+bash scripts/p0_regression.sh
 ```
