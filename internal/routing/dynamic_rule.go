@@ -57,13 +57,24 @@ func (r *DynamicRuleRouter) Match(message string) (RiskResult, bool) {
 }
 
 func matchPattern(message string, pattern string) bool {
-	for _, keyword := range strings.Split(pattern, ",") {
+	for _, keyword := range splitPattern(pattern) {
 		keyword = strings.ToLower(strings.TrimSpace(keyword))
 		if keyword != "" && strings.Contains(message, keyword) {
 			return true
 		}
 	}
 	return false
+}
+
+func splitPattern(pattern string) []string {
+	return strings.FieldsFunc(pattern, func(r rune) bool {
+		switch r {
+		case ',', '，', '、', '\n', '\r', '\t', ' ':
+			return true
+		default:
+			return false
+		}
+	})
 }
 
 func ruleResult(rule DynamicRule) RiskResult {

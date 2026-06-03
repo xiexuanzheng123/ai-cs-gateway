@@ -18,13 +18,13 @@ func NewHandler(service *Service) *Handler {
 func (h *Handler) Send(c *gin.Context) {
 	var request SendMessageRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		writeBadRequest(c, "invalid_chat_request", err)
 		return
 	}
 
 	response, err := h.service.Send(c.Request.Context(), request)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		writeUpstreamError(c, "chat_failed", err)
 		return
 	}
 
@@ -34,13 +34,13 @@ func (h *Handler) Send(c *gin.Context) {
 func (h *Handler) Feedback(c *gin.Context) {
 	var request FeedbackRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		writeBadRequest(c, "invalid_feedback_request", err)
 		return
 	}
 
 	response, err := h.service.SaveFeedback(c.Request.Context(), request)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		writeUpstreamError(c, "feedback_failed", err)
 		return
 	}
 
@@ -50,13 +50,13 @@ func (h *Handler) Feedback(c *gin.Context) {
 func (h *Handler) Handoff(c *gin.Context) {
 	var request HandoffRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		writeBadRequest(c, "invalid_handoff_request", err)
 		return
 	}
 
 	response, err := h.service.CreateHandoff(c.Request.Context(), request)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		writeUpstreamError(c, "handoff_failed", err)
 		return
 	}
 
@@ -66,7 +66,7 @@ func (h *Handler) Handoff(c *gin.Context) {
 func (h *Handler) ListRules(c *gin.Context) {
 	rules, err := h.service.ListRules(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		writeUpstreamError(c, "list_rules_failed", err)
 		return
 	}
 
@@ -76,13 +76,13 @@ func (h *Handler) ListRules(c *gin.Context) {
 func (h *Handler) CreateRule(c *gin.Context) {
 	var request RuleConfigRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		writeBadRequest(c, "invalid_rule_request", err)
 		return
 	}
 
 	rule, err := h.service.CreateRule(c.Request.Context(), request)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		writeUpstreamError(c, "create_rule_failed", err)
 		return
 	}
 
@@ -92,19 +92,19 @@ func (h *Handler) CreateRule(c *gin.Context) {
 func (h *Handler) UpdateRule(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || id <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid rule id"})
+		writeBadRequest(c, "invalid_rule_id", nil)
 		return
 	}
 
 	var request RuleConfigRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		writeBadRequest(c, "invalid_rule_request", err)
 		return
 	}
 
 	rule, err := h.service.UpdateRule(c.Request.Context(), id, request)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		writeUpstreamError(c, "update_rule_failed", err)
 		return
 	}
 
@@ -113,7 +113,7 @@ func (h *Handler) UpdateRule(c *gin.Context) {
 
 func (h *Handler) ReloadRules(c *gin.Context) {
 	if err := h.service.ReloadRules(c.Request.Context()); err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		writeUpstreamError(c, "reload_rules_failed", err)
 		return
 	}
 
