@@ -30,6 +30,37 @@ type AIEventRecord struct {
 	ModelUsed       string
 }
 
+type TraceStageRecord struct {
+	Name      string `json:"name"`
+	Status    string `json:"status"`
+	LatencyMS int    `json:"latency_ms"`
+	Detail    string `json:"detail"`
+}
+
+type TraceLogRecord struct {
+	ID              int64              `json:"id"`
+	TraceID         string             `json:"trace_id"`
+	ConversationID  string             `json:"conversation_id"`
+	MessageID       string             `json:"message_id"`
+	UserID          string             `json:"user_id"`
+	Channel         string             `json:"channel"`
+	MessageType     string             `json:"message_type"`
+	UserMessage     string             `json:"user_message"`
+	ResponseText    string             `json:"response_text"`
+	Intent          string             `json:"intent"`
+	Route           string             `json:"route"`
+	ResponseType    string             `json:"response_type"`
+	RiskLevel       string             `json:"risk_level"`
+	HandoffRequired bool               `json:"handoff_required"`
+	HandoffReason   string             `json:"handoff_reason"`
+	ModelUsed       string             `json:"model_used"`
+	TotalLatencyMS  int                `json:"total_latency_ms"`
+	Stages          []TraceStageRecord `json:"stages"`
+	RAGMatches      []RAGSearchResult  `json:"rag_matches"`
+	ErrorMessage    string             `json:"error_message"`
+	CreatedAt       string             `json:"created_at"`
+}
+
 type FeedbackRecord struct {
 	ConversationID string
 	MessageID      string
@@ -127,6 +158,8 @@ type Store interface {
 	SaveConversation(ctx context.Context, record ConversationRecord) error
 	SaveMessage(ctx context.Context, record MessageRecord) error
 	SaveAIEvent(ctx context.Context, record AIEventRecord) error
+	SaveTraceLog(ctx context.Context, record TraceLogRecord) error
+	ListTraceLogs(ctx context.Context, limit int) ([]TraceLogRecord, error)
 	SaveFeedback(ctx context.Context, record FeedbackRecord) error
 	SaveHandoff(ctx context.Context, record HandoffRecord) error
 	ListRules(ctx context.Context) ([]RuleConfigRecord, error)
@@ -162,6 +195,14 @@ func (NoopStore) SaveMessage(ctx context.Context, record MessageRecord) error {
 
 func (NoopStore) SaveAIEvent(ctx context.Context, record AIEventRecord) error {
 	return nil
+}
+
+func (NoopStore) SaveTraceLog(ctx context.Context, record TraceLogRecord) error {
+	return nil
+}
+
+func (NoopStore) ListTraceLogs(ctx context.Context, limit int) ([]TraceLogRecord, error) {
+	return []TraceLogRecord{}, nil
 }
 
 func (NoopStore) SaveFeedback(ctx context.Context, record FeedbackRecord) error {

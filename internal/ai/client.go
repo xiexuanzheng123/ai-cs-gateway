@@ -86,6 +86,7 @@ func NewClient(baseURL string, timeout time.Duration) *Client {
 
 func (c *Client) Reply(ctx context.Context, request ReplyRequest) (ReplyResponse, error) {
 	var response ReplyResponse
+	// LLM 回复统一通过 Python AI Service，Go 网关不直接持有模型 SDK。
 	if err := c.post(ctx, "/v1/ai/reply", request, &response); err != nil {
 		return ReplyResponse{}, err
 	}
@@ -94,6 +95,7 @@ func (c *Client) Reply(ctx context.Context, request ReplyRequest) (ReplyResponse
 
 func (c *Client) UpsertVectors(ctx context.Context, request VectorUpsertRequest) (VectorUpsertResponse, error) {
 	var response VectorUpsertResponse
+	// 知识库 chunk 写向量库：Python 负责 embedding 和 Milvus upsert。
 	if err := c.post(ctx, "/vector/chunks/upsert", request, &response); err != nil {
 		return VectorUpsertResponse{}, err
 	}
@@ -102,6 +104,7 @@ func (c *Client) UpsertVectors(ctx context.Context, request VectorUpsertRequest)
 
 func (c *Client) SearchVectors(ctx context.Context, request VectorSearchRequest) (VectorSearchResponse, error) {
 	var response VectorSearchResponse
+	// RAG 检索第一段：Python 返回 chunk_id 和分数，Go 再回查 MySQL 取完整知识内容。
 	if err := c.post(ctx, "/vector/search", request, &response); err != nil {
 		return VectorSearchResponse{}, err
 	}
@@ -125,6 +128,7 @@ func (c *Client) post(ctx context.Context, path string, request any, response an
 	}
 	httpRequest.Header.Set("Content-Type", "application/json")
 
+	// 这里沿用上游请求 ctx；用户请求取消时，未完成的 AI 调用也会被取消。
 	httpResponse, err := c.httpClient.Do(httpRequest)
 	if err != nil {
 		return fmt.Errorf("call ai service: %w", err)

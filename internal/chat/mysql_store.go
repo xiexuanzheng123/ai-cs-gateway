@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -75,6 +76,128 @@ func (s *MySQLStore) SaveAIEvent(ctx context.Context, record AIEventRecord) erro
 		return fmt.Errorf("save ai event: %w", err)
 	}
 	return nil
+}
+
+func (s *MySQLStore) SaveTraceLog(ctx context.Context, record TraceLogRecord) error {
+	// stages/rag_matches 保留为 JSON，方便后台一次性展示完整链路详情。
+	stagesJSON, err := json.Marshal(record.Stages)
+	if err != nil {
+		return fmt.Errorf("marshal trace stages: %w", err)
+	}
+	ragMatchesJSON, err := json.Marshal(record.RAGMatches)
+	if err != nil {
+		return fmt.Errorf("marshal trace rag matches: %w", err)
+	}
+
+	_, err = s.db.ExecContext(
+		ctx,
+		`INSERT INTO cs_trace_log
+		 (trace_id, conversation_id, message_id, user_id, channel, message_type,
+		  user_message, response_text, intent, route, response_type, risk_level,
+		  handoff_required, handoff_reason, model_used, total_latency_ms,
+		  stages, rag_matches, error_message)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON DUPLICATE KEY UPDATE
+		  response_text = VALUES(response_text),
+		  intent = VALUES(intent),
+		  route = VALUES(route),
+		  response_type = VALUES(response_type),
+		  risk_level = VALUES(risk_level),
+		  handoff_required = VALUES(handoff_required),
+		  handoff_reason = VALUES(handoff_reason),
+		  model_used = VALUES(model_used),
+		  total_latency_ms = VALUES(total_latency_ms),
+		  stages = VALUES(stages),
+		  rag_matches = VALUES(rag_matches),
+		  error_message = VALUES(error_message)`,
+		record.TraceID,
+		record.ConversationID,
+		record.MessageID,
+		record.UserID,
+		record.Channel,
+		record.MessageType,
+		record.UserMessage,
+		record.ResponseText,
+		record.Intent,
+		record.Route,
+		record.ResponseType,
+		record.RiskLevel,
+		record.HandoffRequired,
+		record.HandoffReason,
+		record.ModelUsed,
+		record.TotalLatencyMS,
+		string(stagesJSON),
+		string(ragMatchesJSON),
+		record.ErrorMessage,
+	)
+	if err != nil {
+		return fmt.Errorf("save trace log: %w", err)
+	}
+	return nil
+}
+
+func (s *MySQLStore) ListTraceLogs(ctx context.Context, limit int) ([]TraceLogRecord, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT id, trace_id, conversation_id, message_id, user_id, channel, message_type,
+		        COALESCE(user_message, ''), COALESCE(response_text, ''), COALESCE(intent, ''),
+		        COALESCE(route, ''), COALESCE(response_type, ''), COALESCE(risk_level, ''),
+		        handoff_required, COALESCE(handoff_reason, ''), COALESCE(model_used, ''),
+		        COALESCE(total_latency_ms, 0), COALESCE(stages, JSON_ARRAY()),
+		        COALESCE(rag_matches, JSON_ARRAY()), COALESCE(error_message, ''),
+		        DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s')
+		 FROM cs_trace_log
+		 ORDER BY id DESC
+		 LIMIT ?`,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list trace logs: %w", err)
+	}
+	defer rows.Close()
+
+	records := []TraceLogRecord{}
+	for rows.Next() {
+		var record TraceLogRecord
+		var stagesRaw string
+		var ragMatchesRaw string
+		if err := rows.Scan(
+			&record.ID,
+			&record.TraceID,
+			&record.ConversationID,
+			&record.MessageID,
+			&record.UserID,
+			&record.Channel,
+			&record.MessageType,
+			&record.UserMessage,
+			&record.ResponseText,
+			&record.Intent,
+			&record.Route,
+			&record.ResponseType,
+			&record.RiskLevel,
+			&record.HandoffRequired,
+			&record.HandoffReason,
+			&record.ModelUsed,
+			&record.TotalLatencyMS,
+			&stagesRaw,
+			&ragMatchesRaw,
+			&record.ErrorMessage,
+			&record.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan trace log: %w", err)
+		}
+		_ = json.Unmarshal([]byte(stagesRaw), &record.Stages)
+		_ = json.Unmarshal([]byte(ragMatchesRaw), &record.RAGMatches)
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate trace logs: %w", err)
+	}
+	return records, nil
 }
 
 func (s *MySQLStore) SaveFeedback(ctx context.Context, record FeedbackRecord) error {
@@ -227,6 +350,7 @@ func (s *MySQLStore) GetFeatureFlag(ctx context.Context, key string) (bool, erro
 		key,
 	).Scan(&enabled)
 	if err == sql.ErrNoRows {
+		// 没配置时默认开启，避免本地初始化漏配导致智能回复整条链路关闭。
 		return true, nil
 	}
 	if err != nil {
@@ -422,6 +546,7 @@ func (s *MySQLStore) replaceKnowledgeChunks(ctx context.Context, knowledgeID str
 	}
 	defer tx.Rollback()
 
+	// chunk 采用先删后插，避免知识内容变短时残留旧 chunk 被继续召回。
 	if knowledgeID == "" {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM cs_knowledge_chunk`); err != nil {
 			return fmt.Errorf("clear knowledge chunks: %w", err)
@@ -501,6 +626,7 @@ func (s *MySQLStore) UpdateKnowledgeChunkVectorIDs(ctx context.Context, vectorID
 	if len(vectorIDs) == 0 {
 		return nil
 	}
+	// Milvus 写入成功后回填 vector_id，后台可据此判断 chunk 是否已经进入向量库。
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin update vector ids: %w", err)
@@ -535,6 +661,7 @@ func (s *MySQLStore) GetKnowledgeByChunkIDs(ctx context.Context, chunkIDs []stri
 		args = append(args, chunkID)
 	}
 
+	// Milvus 只返回 chunk_id；最终回答内容必须回查 MySQL，保证展示的是业务知识原文。
 	rows, err := s.db.QueryContext(
 		ctx,
 		`SELECT c.chunk_id, c.knowledge_id, k.title, k.content, c.chunk_text

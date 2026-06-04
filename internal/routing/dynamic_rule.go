@@ -32,6 +32,7 @@ func (r *DynamicRuleRouter) ReplaceRules(rules []DynamicRule) {
 		}
 	}
 
+	// 读写分离：刷新规则时整体替换，消息匹配时只读内存快照。
 	r.mu.Lock()
 	r.rules = enabledRules
 	r.mu.Unlock()
@@ -47,6 +48,7 @@ func (r *DynamicRuleRouter) Match(message string) (RiskResult, bool) {
 	rules := append([]DynamicRule(nil), r.rules...)
 	r.mu.RUnlock()
 
+	// 规则已按优先级从 MySQL 排好序，先命中的规则直接决定路由。
 	for _, rule := range rules {
 		if !matchPattern(normalized, rule.Pattern) {
 			continue
@@ -67,6 +69,7 @@ func matchPattern(message string, pattern string) bool {
 }
 
 func splitPattern(pattern string) []string {
+	// 后台配置允许用逗号、顿号、空格或换行分隔关键词，降低运营配置成本。
 	return strings.FieldsFunc(pattern, func(r rune) bool {
 		switch r {
 		case ',', '，', '、', '\n', '\r', '\t', ' ':

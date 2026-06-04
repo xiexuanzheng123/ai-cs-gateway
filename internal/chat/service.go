@@ -112,12 +112,39 @@ type Service struct {
 	riskRouter    *routing.RiskRouter
 	dynamicRouter *routing.DynamicRuleRouter
 	store         Store
+	traceLogger   *TraceLogger
 }
 
 type AIClient interface {
 	Reply(ctx context.Context, request ai.ReplyRequest) (ai.ReplyResponse, error)
 	UpsertVectors(ctx context.Context, request ai.VectorUpsertRequest) (ai.VectorUpsertResponse, error)
 	SearchVectors(ctx context.Context, request ai.VectorSearchRequest) (ai.VectorSearchResponse, error)
+}
+
+type traceRecorder struct {
+	startedAt time.Time
+	record    TraceLogRecord
+}
+
+func (r *traceRecorder) stage(name string, status string, startedAt time.Time, detail string) {
+	r.record.Stages = append(r.record.Stages, TraceStageRecord{
+		Name:      name,
+		Status:    status,
+		LatencyMS: elapsedMilliseconds(startedAt),
+		Detail:    detail,
+	})
+}
+
+func (r *traceRecorder) finish(response SendMessageResponse, model string, totalLatencyMS int) {
+	r.record.ResponseText = response.Content.Text
+	r.record.Intent = response.Intent
+	r.record.Route = response.Route
+	r.record.ResponseType = response.ResponseType
+	r.record.RiskLevel = response.RiskLevel
+	r.record.HandoffRequired = response.Handoff.Required
+	r.record.HandoffReason = response.Handoff.Reason
+	r.record.ModelUsed = model
+	r.record.TotalLatencyMS = totalLatencyMS
 }
 
 func NewService(aiClient AIClient, riskRouter *routing.RiskRouter, store Store) *Service {
@@ -129,6 +156,7 @@ func NewService(aiClient AIClient, riskRouter *routing.RiskRouter, store Store) 
 		riskRouter:    riskRouter,
 		dynamicRouter: routing.NewDynamicRuleRouter(),
 		store:         store,
+		traceLogger:   NewTraceLogger(store),
 	}
 }
 
@@ -137,14 +165,34 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 	traceID := newID("trace")
 	conversationID := request.ConversationID
 
+	// trace 只在内存中累计阶段信息，最终交给异步 logger 写库，避免拖慢用户回复。
+	trace := &traceRecorder{
+		startedAt: startedAt,
+		record: TraceLogRecord{
+			TraceID:        traceID,
+			ConversationID: conversationID,
+			MessageID:      request.MessageID,
+			UserID:         request.UserID,
+			Channel:        request.Channel,
+			MessageType:    request.MessageType,
+			UserMessage:    request.Message,
+		},
+	}
+
+	stageStarted := time.Now()
 	if err := s.store.SaveConversation(ctx, ConversationRecord{
 		ConversationID: conversationID,
 		UserID:         request.UserID,
 		Channel:        request.Channel,
 		Status:         "active",
 	}); err != nil {
+		trace.stage("save_conversation", "error", stageStarted, err.Error())
+		s.saveTraceError(ctx, trace, err)
 		return SendMessageResponse{}, err
 	}
+	trace.stage("save_conversation", "ok", stageStarted, "会话写入")
+
+	stageStarted = time.Now()
 	if err := s.store.SaveMessage(ctx, MessageRecord{
 		MessageID:      request.MessageID,
 		ConversationID: conversationID,
@@ -152,45 +200,71 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 		MessageType:    request.MessageType,
 		Content:        request.Message,
 	}); err != nil {
+		trace.stage("save_user_message", "error", stageStarted, err.Error())
+		s.saveTraceError(ctx, trace, err)
 		return SendMessageResponse{}, err
 	}
+	trace.stage("save_user_message", "ok", stageStarted, "用户消息写入")
 
+	// 图片/语音当前不进入 RAG/LLM，先引导用户补充文字信息。
+	stageStarted = time.Now()
 	if result, matched := s.matchMediaGuide(request.MessageType); matched {
-		return s.saveRoutedResponse(ctx, startedAt, traceID, request, result)
+		trace.stage("media_guide", "hit", stageStarted, result.Intent)
+		return s.saveRoutedResponse(ctx, startedAt, traceID, request, result, trace)
 	}
+	trace.stage("media_guide", "miss", stageStarted, request.MessageType)
 
+	// 强规则优先于 AI：命中后直接回复或转人工，不再继续走 RAG/LLM。
+	stageStarted = time.Now()
 	if result, matched := s.matchRule(request.Message); matched {
-		return s.saveRoutedResponse(ctx, startedAt, traceID, request, result)
+		trace.stage("rule_match", "hit", stageStarted, result.Route+"/"+result.Intent)
+		return s.saveRoutedResponse(ctx, startedAt, traceID, request, result, trace)
 	}
+	trace.stage("rule_match", "miss", stageStarted, "无规则命中")
 
+	// 智能回复
+	stageStarted = time.Now()
 	smartReplyEnabled, err := s.store.GetFeatureFlag(ctx, "smart_reply_enabled")
 	if err != nil {
+		trace.stage("feature_flag", "error", stageStarted, err.Error())
+		s.saveTraceError(ctx, trace, err)
 		return SendMessageResponse{}, err
 	}
 	if !smartReplyEnabled {
+		trace.stage("feature_flag", "off", stageStarted, "smart_reply_enabled=false")
 		return s.saveRoutedResponse(ctx, startedAt, traceID, request, routing.RiskResult{
 			Intent:      "feature_disabled",
 			Route:       "fixed_faq_fallback",
 			RiskLevel:   "low",
 			Reply:       "您好，当前智能回复已关闭。您可以选择常见问题或转人工继续处理。",
 			Suggestions: []string{"密码错误过多", "找回账号密码", "转人工"},
-		})
+		}, trace)
 	}
+	trace.stage("feature_flag", "on", stageStarted, "smart_reply_enabled=true")
 
-	ragResult, ragMatched, err := s.SearchRAG(ctx, request.Message, 3)
+	// 规则未命中后先走 RAG；高置信知识直接回答，低置信再交给 LLM。
+	stageStarted = time.Now()
+	ragResult, ragMatches, ragMatched, err := s.searchRAG(ctx, request.Message, 3)
 	if err != nil {
+		trace.stage("rag_search", "error", stageStarted, err.Error())
+		s.saveTraceError(ctx, trace, err)
 		return SendMessageResponse{}, err
 	}
+	trace.record.RAGMatches = ragMatches
 	if ragMatched {
+		trace.stage("rag_search", "direct_answer", stageStarted, fmt.Sprintf("召回 %d 条，命中 %s %.3f", len(ragMatches), ragResult.KnowledgeID, ragResult.Score))
 		return s.saveRoutedResponse(ctx, startedAt, traceID, request, routing.RiskResult{
 			Intent:      "rag_knowledge",
 			Route:       "rag",
 			RiskLevel:   "low",
 			Reply:       ragReply(ragResult),
 			Suggestions: []string{"有用", "没用", "转人工"},
-		})
+		}, trace)
 	}
+	trace.stage("rag_search", "rewrite_to_llm", stageStarted, fmt.Sprintf("召回 %d 条，无高置信知识，进入 LLM", len(ragMatches)))
 
+	// LLM 是最后一层智能回复兜底，Python 服务内部会做意图识别和模型调用。
+	stageStarted = time.Now()
 	aiResponse, err := s.aiClient.Reply(ctx, ai.ReplyRequest{
 		SessionID:       conversationID,
 		UserID:          request.UserID,
@@ -199,8 +273,11 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 		BusinessContext: map[string]any{},
 	})
 	if err != nil {
+		trace.stage("llm_reply", "error", stageStarted, err.Error())
+		s.saveTraceError(ctx, trace, err)
 		return SendMessageResponse{}, err
 	}
+	trace.stage("llm_reply", "ok", stageStarted, aiResponse.Intent)
 
 	response := SendMessageResponse{
 		TraceID:        traceID,
@@ -213,6 +290,7 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 		RiskLevel:      aiResponse.RiskLevel,
 		MessageID:      request.MessageID,
 	}
+	// 主业务消息仍同步落库，保证会话记录完整；观测日志单独异步写。
 	if err := s.store.SaveMessage(ctx, MessageRecord{
 		MessageID:      newID("message"),
 		ConversationID: conversationID,
@@ -220,6 +298,7 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 		MessageType:    "text",
 		Content:        response.Content.Text,
 	}); err != nil {
+		s.saveTraceError(ctx, trace, err)
 		return SendMessageResponse{}, err
 	}
 	if err := s.store.SaveAIEvent(ctx, AIEventRecord{
@@ -234,8 +313,11 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 		LatencyMS:       elapsedMilliseconds(startedAt),
 		ModelUsed:       "ai-service",
 	}); err != nil {
+		s.saveTraceError(ctx, trace, err)
 		return SendMessageResponse{}, err
 	}
+	trace.finish(response, "ai-service", elapsedMilliseconds(startedAt))
+	s.emitTrace(trace)
 	return response, nil
 }
 
@@ -292,6 +374,7 @@ func (s *Service) ReloadRules(ctx context.Context) error {
 		return err
 	}
 
+	// 规则从 MySQL 加载到内存，用户消息进来时只做内存匹配，不每次查库。
 	dynamicRules := make([]routing.DynamicRule, 0, len(rules))
 	for _, rule := range rules {
 		dynamicRules = append(dynamicRules, routing.DynamicRule{
@@ -310,6 +393,10 @@ func (s *Service) ReloadRules(ctx context.Context) error {
 
 func (s *Service) GetDashboard(ctx context.Context) (DashboardStats, error) {
 	return s.store.GetDashboardStats(ctx)
+}
+
+func (s *Service) ListTraceLogs(ctx context.Context, limit int) ([]TraceLogRecord, error) {
+	return s.store.ListTraceLogs(ctx, limit)
 }
 
 func (s *Service) ListFeatureFlags(ctx context.Context) ([]FeatureFlagRecord, error) {
@@ -352,6 +439,7 @@ func (s *Service) SyncKnowledgeChunks(ctx context.Context) (KnowledgeChunkSyncRe
 		return KnowledgeChunkSyncResult{}, err
 	}
 
+	// 全量同步只处理 published 知识；草稿不进入 RAG 检索。
 	chunks := []KnowledgeChunkRecord{}
 	publishedCount := 0
 	for _, record := range knowledge {
@@ -383,6 +471,7 @@ func (s *Service) rebuildKnowledgeChunks(ctx context.Context, record KnowledgeRe
 	if record.Status == "published" {
 		chunks = buildKnowledgeChunks(record)
 	}
+	// 单条知识变更时，先替换 MySQL chunk，再同步向量，保证两边 chunk_id 对齐。
 	if err := s.store.ReplaceKnowledgeChunksByKnowledgeID(ctx, record.KnowledgeID, chunks); err != nil {
 		return err
 	}
@@ -395,6 +484,7 @@ func (s *Service) upsertKnowledgeChunks(ctx context.Context, chunks []KnowledgeC
 		return 0, "", nil
 	}
 
+	// Gateway 不直接生成向量，只把 chunk 文本交给 Python AI Service。
 	vectorChunks := make([]ai.VectorChunk, 0, len(chunks))
 	for _, chunk := range chunks {
 		vectorChunks = append(vectorChunks, ai.VectorChunk{
@@ -420,12 +510,18 @@ func (s *Service) upsertKnowledgeChunks(ctx context.Context, chunks []KnowledgeC
 }
 
 func (s *Service) SearchRAG(ctx context.Context, query string, topK int) (RAGSearchResult, bool, error) {
+	result, _, matched, err := s.searchRAG(ctx, query, topK)
+	return result, matched, err
+}
+
+func (s *Service) searchRAG(ctx context.Context, query string, topK int) (RAGSearchResult, []RAGSearchResult, bool, error) {
+	// Python 负责 embedding + Milvus 召回；Gateway 根据 chunk_id 回查 MySQL 取完整知识内容。
 	response, err := s.aiClient.SearchVectors(ctx, ai.VectorSearchRequest{Query: query, TopK: topK})
 	if err != nil {
-		return RAGSearchResult{}, false, err
+		return RAGSearchResult{}, nil, false, err
 	}
-	if len(response.Items) == 0 || response.Items[0].Score < 0.78 {
-		return RAGSearchResult{}, false, nil
+	if len(response.Items) == 0 {
+		return RAGSearchResult{}, []RAGSearchResult{}, false, nil
 	}
 
 	chunkIDs := make([]string, 0, len(response.Items))
@@ -438,17 +534,27 @@ func (s *Service) SearchRAG(ctx context.Context, query string, topK int) (RAGSea
 	}
 	records, err := s.store.GetKnowledgeByChunkIDs(ctx, chunkIDs)
 	if err != nil {
-		return RAGSearchResult{}, false, err
+		return RAGSearchResult{}, nil, false, err
 	}
 
-	best := response.Items[0].ChunkID
-	result, ok := records[best]
-	if !ok {
-		return RAGSearchResult{}, false, nil
+	matches := make([]RAGSearchResult, 0, len(response.Items))
+	for _, item := range response.Items {
+		result, ok := records[item.ChunkID]
+		if !ok {
+			result = RAGSearchResult{
+				ChunkID:     item.ChunkID,
+				KnowledgeID: item.KnowledgeID,
+			}
+		}
+		result.Score = scores[item.ChunkID]
+		result.ChunkText = firstNonEmpty(chunkText[item.ChunkID], result.ChunkText)
+		matches = append(matches, result)
 	}
-	result.Score = scores[best]
-	result.ChunkText = firstNonEmpty(chunkText[best], result.ChunkText)
-	return result, true, nil
+	// 低于阈值时不直接拿知识库回答，避免相似但不准确的内容误导用户。
+	if matches[0].Score < 0.78 {
+		return RAGSearchResult{}, matches, false, nil
+	}
+	return matches[0], matches, true, nil
 }
 
 func (s *Service) ListRAGEvalCases(ctx context.Context) ([]RAGEvalCaseRecord, error) {
@@ -493,7 +599,7 @@ func (s *Service) matchMediaGuide(messageType string) (routing.RiskResult, bool)
 	}
 }
 
-func (s *Service) saveRoutedResponse(ctx context.Context, startedAt time.Time, traceID string, request SendMessageRequest, result routing.RiskResult) (SendMessageResponse, error) {
+func (s *Service) saveRoutedResponse(ctx context.Context, startedAt time.Time, traceID string, request SendMessageRequest, result routing.RiskResult, trace *traceRecorder) (SendMessageResponse, error) {
 	response := SendMessageResponse{
 		TraceID:        traceID,
 		ConversationID: request.ConversationID,
@@ -512,6 +618,7 @@ func (s *Service) saveRoutedResponse(ctx context.Context, startedAt time.Time, t
 		MessageType:    "text",
 		Content:        response.Content.Text,
 	}); err != nil {
+		s.saveTraceError(ctx, trace, err)
 		return SendMessageResponse{}, err
 	}
 	if err := s.store.SaveAIEvent(ctx, AIEventRecord{
@@ -525,9 +632,30 @@ func (s *Service) saveRoutedResponse(ctx context.Context, startedAt time.Time, t
 		HandoffReason:   response.Handoff.Reason,
 		LatencyMS:       elapsedMilliseconds(startedAt),
 	}); err != nil {
+		s.saveTraceError(ctx, trace, err)
 		return SendMessageResponse{}, err
 	}
+	if trace != nil {
+		trace.finish(response, "", elapsedMilliseconds(startedAt))
+		s.emitTrace(trace)
+	}
 	return response, nil
+}
+
+func (s *Service) saveTraceError(ctx context.Context, trace *traceRecorder, err error) {
+	if trace == nil || err == nil {
+		return
+	}
+	trace.record.ErrorMessage = err.Error()
+	trace.record.TotalLatencyMS = elapsedMilliseconds(trace.startedAt)
+	s.emitTrace(trace)
+}
+
+func (s *Service) emitTrace(trace *traceRecorder) {
+	if trace == nil || s.traceLogger == nil {
+		return
+	}
+	s.traceLogger.Enqueue(trace.record)
 }
 
 func responseContent(text string, suggestions []string) ResponseContent {

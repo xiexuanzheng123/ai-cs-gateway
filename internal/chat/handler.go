@@ -22,6 +22,7 @@ func (h *Handler) Send(c *gin.Context) {
 		return
 	}
 
+	// Handler 只做 HTTP 入参/出参转换，真正的客服编排逻辑都在 Service.Send。
 	response, err := h.service.Send(c.Request.Context(), request)
 	if err != nil {
 		writeUpstreamError(c, "chat_failed", err)
@@ -112,6 +113,7 @@ func (h *Handler) UpdateRule(c *gin.Context) {
 }
 
 func (h *Handler) ReloadRules(c *gin.Context) {
+	// 规则变更后显式 reload，把 MySQL 配置刷新到内存路由器。
 	if err := h.service.ReloadRules(c.Request.Context()); err != nil {
 		writeUpstreamError(c, "reload_rules_failed", err)
 		return
@@ -128,6 +130,17 @@ func (h *Handler) Dashboard(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, stats)
+}
+
+func (h *Handler) ListTraceLogs(c *gin.Context) {
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	records, err := h.service.ListTraceLogs(c.Request.Context(), limit)
+	if err != nil {
+		writeUpstreamError(c, "list_trace_logs_failed", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"logs": records})
 }
 
 func (h *Handler) ListFeatureFlags(c *gin.Context) {
@@ -207,6 +220,7 @@ func (h *Handler) UpdateKnowledge(c *gin.Context) {
 }
 
 func (h *Handler) SyncKnowledgeChunks(c *gin.Context) {
+	// 手动全量同步：重建 MySQL chunk，并触发 Python 服务写入 Milvus。
 	result, err := h.service.SyncKnowledgeChunks(c.Request.Context())
 	if err != nil {
 		writeUpstreamError(c, "sync_knowledge_chunks_failed", err)
@@ -227,6 +241,7 @@ func (h *Handler) SearchRAG(c *gin.Context) {
 		topK = 3
 	}
 
+	// 内部调试接口：只验证 RAG 召回，不会写会话消息或触发 LLM。
 	result, matched, err := h.service.SearchRAG(c.Request.Context(), request.Query, topK)
 	if err != nil {
 		writeUpstreamError(c, "rag_search_failed", err)

@@ -20,6 +20,7 @@ func NewRiskRouter() *RiskRouter {
 func (r *RiskRouter) Match(message string) (RiskResult, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(message))
 
+	// 内置规则是最后的安全网；运营规则可覆盖更多细节，但高风险词不能完全依赖后台配置。
 	if containsAny(normalized, []string{"转人工", "人工客服", "真人客服"}) {
 		return handoff("human_requested", "您已选择转人工，我会为您接入人工客服。"), true
 	}

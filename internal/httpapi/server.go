@@ -72,11 +72,14 @@ func NewServer(cfg config.Config) *gin.Engine {
 	router.POST("/api/customer-service/feedback", chatHandler.Feedback)
 	router.POST("/api/customer-service/handoff", chatHandler.Handoff)
 	router.POST("/api/customer-service/rag/search", chatHandler.SearchRAG)
+
+	// 后台配置接口：当前先放在 H5 管理页里，后续可独立成真正的管理后台。
 	router.GET("/api/customer-service/admin/rules", chatHandler.ListRules)
 	router.POST("/api/customer-service/admin/rules", chatHandler.CreateRule)
 	router.PUT("/api/customer-service/admin/rules/:id", chatHandler.UpdateRule)
 	router.POST("/api/customer-service/admin/rules/reload", chatHandler.ReloadRules)
 	router.GET("/api/customer-service/admin/dashboard", chatHandler.Dashboard)
+	router.GET("/api/customer-service/admin/trace-logs", chatHandler.ListTraceLogs)
 	router.GET("/api/customer-service/admin/flags", chatHandler.ListFeatureFlags)
 	router.PUT("/api/customer-service/admin/flags/:key", chatHandler.SetFeatureFlag)
 	router.GET("/api/customer-service/admin/knowledge", chatHandler.ListKnowledge)
