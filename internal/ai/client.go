@@ -31,6 +31,7 @@ type ReplyRequest struct {
 type ReplyResponse struct {
 	Reply           string   `json:"reply"`
 	Intent          string   `json:"intent"`
+	Route           string   `json:"route"`
 	RiskLevel       string   `json:"risk_level"`
 	TransferToHuman bool     `json:"transfer_to_human"`
 	Suggestions     []string `json:"suggestions"`

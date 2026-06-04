@@ -40,12 +40,14 @@ func NewServer(cfg config.Config) *gin.Engine {
 			return redisClient.Ping(ctx).Err()
 		}
 	}
-
+	// AI 服务客户端，通过 HTTP 调用 Python AI Service。
 	aiClient := ai.NewClient(cfg.AIServiceBaseURL, time.Duration(cfg.AIServiceTimeoutSeconds)*time.Second)
+	// 客服服务，负责编排 AI 回复逻辑。核心业务：Send、反馈、RAG、规则…
 	chatService := chat.NewService(aiClient, routing.NewRiskRouter(), chatStore)
 	if err := chatService.ReloadRules(context.Background()); err != nil {
 		log.Printf("load rules: %v", err)
 	}
+	// 客服 handler，负责 HTTP 接口转换。绑 JSON、调 Service、写 JSON 响应
 	chatHandler := chat.NewHandler(chatService)
 
 	router.GET("/api/customer-service/health", func(c *gin.Context) {

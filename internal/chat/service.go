@@ -242,35 +242,45 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 	}
 	trace.stage("feature_flag", "on", stageStarted, "smart_reply_enabled=true")
 
-	// 规则未命中后先走 RAG；高置信知识直接回答，低置信再交给 LLM。
+	// 规则未命中后先走 RAG：无可用资料则固定兜底；有资料则把召回片段交给 LLM 组织回答。
 	stageStarted = time.Now()
-	ragResult, ragMatches, ragMatched, err := s.searchRAG(ctx, request.Message, 3)
+	_, ragMatches, _, err := s.searchRAG(ctx, request.Message, 3)
 	if err != nil {
 		trace.stage("rag_search", "error", stageStarted, err.Error())
 		s.saveTraceError(ctx, trace, err)
 		return SendMessageResponse{}, err
 	}
 	trace.record.RAGMatches = ragMatches
-	if ragMatched {
-		trace.stage("rag_search", "direct_answer", stageStarted, fmt.Sprintf("召回 %d 条，命中 %s %.3f", len(ragMatches), ragResult.KnowledgeID, ragResult.Score))
+	if !ragHasUsableKnowledge(ragMatches) {
+		detail := fmt.Sprintf("召回 %d 条，无可用知识（零召回或分数低于 %.2f）", len(ragMatches), ragMinScore)
+		trace.stage("rag_search", "no_knowledge", stageStarted, detail)
 		return s.saveRoutedResponse(ctx, startedAt, traceID, request, routing.RiskResult{
-			Intent:      "rag_knowledge",
-			Route:       "rag",
-			RiskLevel:   "low",
-			Reply:       ragReply(ragResult),
-			Suggestions: []string{"有用", "没用", "转人工"},
+			Intent:          "rag_no_knowledge",
+			Route:           "rag_fallback",
+			RiskLevel:       "low",
+			Reply:           ragNoKnowledgeFallbackReply,
+			Suggestions:     []string{"继续描述问题", "转人工"},
+			TransferToHuman: false,
 		}, trace)
 	}
-	trace.stage("rag_search", "rewrite_to_llm", stageStarted, fmt.Sprintf("召回 %d 条，无高置信知识，进入 LLM", len(ragMatches)))
 
-	// LLM 是最后一层智能回复兜底，Python 服务内部会做意图识别和模型调用。
+	usableMatches := usableRAGMatches(ragMatches)
+	trace.stage(
+		"rag_search",
+		"rag_llm",
+		stageStarted,
+		fmt.Sprintf("召回 %d 条，可用 %d 条，Top %.3f", len(ragMatches), len(usableMatches), usableMatches[0].Score),
+	)
+
 	stageStarted = time.Now()
 	aiResponse, err := s.aiClient.Reply(ctx, ai.ReplyRequest{
 		SessionID:       conversationID,
 		UserID:          request.UserID,
 		Message:         request.Message,
 		History:         []ai.HistoryItem{},
-		BusinessContext: map[string]any{},
+		BusinessContext: map[string]any{
+			"retrieved_passages": buildRetrievedPassages(usableMatches),
+		},
 	})
 	if err != nil {
 		trace.stage("llm_reply", "error", stageStarted, err.Error())
@@ -286,7 +296,7 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 		Content:        responseContent(aiResponse.Reply, aiResponse.Suggestions),
 		Handoff:        handoffDecision(aiResponse.TransferToHuman, aiResponse.Intent),
 		Intent:         aiResponse.Intent,
-		Route:          "ai_reply",
+		Route:          firstNonEmpty(aiResponse.Route, "rag_llm"),
 		RiskLevel:      aiResponse.RiskLevel,
 		MessageID:      request.MessageID,
 	}
@@ -306,7 +316,7 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 		ConversationID:  conversationID,
 		MessageID:       request.MessageID,
 		Intent:          response.Intent,
-		Route:           "ai_reply",
+		Route:           response.Route,
 		ResponseType:    response.ResponseType,
 		HandoffRequired: response.Handoff.Required,
 		HandoffReason:   response.Handoff.Reason,
@@ -550,11 +560,58 @@ func (s *Service) searchRAG(ctx context.Context, query string, topK int) (RAGSea
 		result.ChunkText = firstNonEmpty(chunkText[item.ChunkID], result.ChunkText)
 		matches = append(matches, result)
 	}
-	// 低于阈值时不直接拿知识库回答，避免相似但不准确的内容误导用户。
-	if matches[0].Score < 0.78 {
+	matched := ragHasUsableKnowledge(matches)
+	if !matched {
 		return RAGSearchResult{}, matches, false, nil
 	}
 	return matches[0], matches, true, nil
+}
+
+const (
+	ragMinScore                   = 0.78
+	ragNoKnowledgeFallbackReply   = "抱歉，暂未在知识库中查到与您问题直接相关的内容。您可以换个方式描述问题，或选择转人工客服为您处理。"
+)
+
+func ragPassageText(result RAGSearchResult) string {
+	return firstNonEmpty(result.Content, result.ChunkText)
+}
+
+func ragHasUsableKnowledge(matches []RAGSearchResult) bool {
+	if len(matches) == 0 {
+		return false
+	}
+	if matches[0].Score < ragMinScore {
+		return false
+	}
+	return strings.TrimSpace(ragPassageText(matches[0])) != ""
+}
+
+func usableRAGMatches(matches []RAGSearchResult) []RAGSearchResult {
+	usable := make([]RAGSearchResult, 0, len(matches))
+	for _, match := range matches {
+		if match.Score < ragMinScore {
+			continue
+		}
+		if strings.TrimSpace(ragPassageText(match)) == "" {
+			continue
+		}
+		usable = append(usable, match)
+	}
+	return usable
+}
+
+func buildRetrievedPassages(matches []RAGSearchResult) []map[string]any {
+	passages := make([]map[string]any, 0, len(matches))
+	for _, match := range matches {
+		passages = append(passages, map[string]any{
+			"knowledge_id": match.KnowledgeID,
+			"chunk_id":     match.ChunkID,
+			"title":        match.Title,
+			"score":        match.Score,
+			"text":         ragPassageText(match),
+		})
+	}
+	return passages
 }
 
 func (s *Service) ListRAGEvalCases(ctx context.Context) ([]RAGEvalCaseRecord, error) {
