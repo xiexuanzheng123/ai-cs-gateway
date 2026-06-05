@@ -14,6 +14,7 @@ import (
 	"ai-cs-gateway/internal/storage"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 )
 
 func NewServer(cfg config.Config) *gin.Engine {
@@ -31,11 +32,13 @@ func NewServer(cfg config.Config) *gin.Engine {
 	}
 
 	var redisCheck func(context.Context) error
+	var redisClient *redis.Client
 	if cfg.RedisAddr != "" {
-		redisClient, err := storage.OpenRedis(context.Background(), cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
+		client, err := storage.OpenRedis(context.Background(), cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
 		if err != nil {
 			log.Fatalf("connect redis: %v", err)
 		}
+		redisClient = client
 		redisCheck = func(ctx context.Context) error {
 			return redisClient.Ping(ctx).Err()
 		}
@@ -44,6 +47,10 @@ func NewServer(cfg config.Config) *gin.Engine {
 	aiClient := ai.NewClient(cfg.AIServiceBaseURL, time.Duration(cfg.AIServiceTimeoutSeconds)*time.Second)
 	// 客服服务，负责编排 AI 回复逻辑。核心业务：Send、反馈、RAG、规则…
 	chatService := chat.NewService(aiClient, routing.NewRiskRouter(), chatStore)
+	if redisClient != nil {
+		chatService.SetRAGCache(chat.NewRedisRAGCache(redisClient, 5*time.Minute))
+		chatService.SetSessionMemory(chat.NewRedisSessionMemory(redisClient, 24*time.Hour))
+	}
 	if err := chatService.ReloadRules(context.Background()); err != nil {
 		log.Printf("load rules: %v", err)
 	}

@@ -119,6 +119,8 @@ type Service struct {
 	riskRouter    *routing.RiskRouter
 	dynamicRouter *routing.DynamicRuleRouter
 	store         Store
+	ragCache      RAGCache
+	sessionMemory SessionMemory
 	traceLogger   *TraceLogger
 }
 
@@ -166,6 +168,14 @@ func NewService(aiClient AIClient, riskRouter *routing.RiskRouter, store Store) 
 		store:         store,
 		traceLogger:   NewTraceLogger(store),
 	}
+}
+
+func (s *Service) SetRAGCache(cache RAGCache) {
+	s.ragCache = cache
+}
+
+func (s *Service) SetSessionMemory(memory SessionMemory) {
+	s.sessionMemory = memory
 }
 
 func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMessageResponse, error) {
@@ -250,9 +260,13 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 	}
 	trace.stage("feature_flag", "on", stageStarted, "smart_reply_enabled=true")
 
+	stageStarted = time.Now()
+	memory, memoryStatus := s.loadSessionMemory(ctx, conversationID)
+	trace.stage("session_memory", memoryStatus, stageStarted, fmt.Sprintf("history=%d", len(memory.Messages)))
+
 	// 规则未命中后先走 RAG：无可用资料则固定兜底；有资料则把召回片段交给 LLM 组织回答。
 	stageStarted = time.Now()
-	_, ragMatches, _, err := s.searchRAG(ctx, request.Message, 3)
+	_, ragMatches, _, cacheStatus, err := s.searchRAG(ctx, request.Message, 3)
 	if err != nil {
 		trace.stage("rag_search", "error", stageStarted, err.Error())
 		s.saveTraceError(ctx, trace, err)
@@ -261,7 +275,7 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 	trace.record.RAGMatches = ragMatches
 	if !ragHasUsableKnowledge(ragMatches) {
 		detail := fmt.Sprintf("召回 %d 条，无可用知识（零召回或分数低于 %.2f）", len(ragMatches), ragMinScore)
-		trace.stage("rag_search", "no_knowledge", stageStarted, detail)
+		trace.stage("rag_search", "no_knowledge", stageStarted, withCacheStatus(detail, cacheStatus))
 		return s.saveRoutedResponse(ctx, startedAt, traceID, request, routing.RiskResult{
 			Intent:          "rag_no_knowledge",
 			Route:           "rag_fallback",
@@ -277,7 +291,7 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 		"rag_search",
 		"rag_llm",
 		stageStarted,
-		fmt.Sprintf("召回 %d 条，可用 %d 条，Top %.3f", len(ragMatches), len(usableMatches), usableMatches[0].Score),
+		withCacheStatus(fmt.Sprintf("召回 %d 条，可用 %d 条，Top %.3f", len(ragMatches), len(usableMatches), usableMatches[0].Score), cacheStatus),
 	)
 
 	stageStarted = time.Now()
@@ -285,7 +299,7 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 		SessionID: conversationID,
 		UserID:    request.UserID,
 		Message:   request.Message,
-		History:   []ai.HistoryItem{},
+		History:   memoryHistory(memory),
 		BusinessContext: map[string]any{
 			"retrieved_passages": buildRetrievedPassages(usableMatches),
 		},
@@ -309,6 +323,20 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 		Citations:      citationsFromRetrievedDocs(aiResponse.RetrievedDocs),
 		MessageID:      request.MessageID,
 	}
+
+	stageStarted = time.Now()
+	validation := validateResponse(responseValidationInput{
+		UserMessage: request.Message,
+		Response:    response,
+		RAGMatches:  usableMatches,
+	})
+	if validation.Passed {
+		trace.stage("response_validator", "pass", stageStarted, validation.Reason)
+	} else {
+		trace.stage("response_validator", validation.Action, stageStarted, validation.Reason)
+		response = applyValidationAction(response, validation)
+	}
+
 	// 主业务消息仍同步落库，保证会话记录完整；观测日志单独异步写。
 	if err := s.store.SaveMessage(ctx, MessageRecord{
 		MessageID:      newID("message"),
@@ -336,6 +364,7 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 		return SendMessageResponse{}, err
 	}
 	trace.finish(response, "ai-service", elapsedMilliseconds(startedAt))
+	s.saveSessionMemory(ctx, memory, request, response, trace)
 	s.emitTrace(trace)
 	return response, nil
 }
@@ -470,6 +499,7 @@ func (s *Service) CreateKnowledge(ctx context.Context, request KnowledgeRequest)
 	if err := s.rebuildKnowledgeChunks(ctx, record); err != nil {
 		return KnowledgeRecord{}, err
 	}
+	s.clearRAGCache(ctx)
 	return record, nil
 }
 
@@ -481,6 +511,7 @@ func (s *Service) UpdateKnowledge(ctx context.Context, id int64, request Knowled
 	if err := s.rebuildKnowledgeChunks(ctx, record); err != nil {
 		return KnowledgeRecord{}, err
 	}
+	s.clearRAGCache(ctx)
 	return record, nil
 }
 
@@ -509,6 +540,7 @@ func (s *Service) SyncKnowledgeChunks(ctx context.Context) (KnowledgeChunkSyncRe
 	if err != nil {
 		return KnowledgeChunkSyncResult{}, err
 	}
+	s.clearRAGCache(ctx)
 	return KnowledgeChunkSyncResult{
 		KnowledgeTotal: publishedCount,
 		ChunkTotal:     len(chunks),
@@ -561,18 +593,35 @@ func (s *Service) upsertKnowledgeChunks(ctx context.Context, chunks []KnowledgeC
 }
 
 func (s *Service) SearchRAG(ctx context.Context, query string, topK int) (RAGSearchResult, bool, error) {
-	result, _, matched, err := s.searchRAG(ctx, query, topK)
+	result, _, matched, _, err := s.searchRAG(ctx, query, topK)
 	return result, matched, err
 }
 
-func (s *Service) searchRAG(ctx context.Context, query string, topK int) (RAGSearchResult, []RAGSearchResult, bool, error) {
+func (s *Service) searchRAG(ctx context.Context, query string, topK int) (RAGSearchResult, []RAGSearchResult, bool, string, error) {
+	cacheStatus := "disabled"
+	if s.ragCache != nil {
+		cacheStatus = "miss"
+		matches, hit, err := s.ragCache.Get(ctx, query, topK)
+		if err == nil && hit {
+			if !ragHasUsableKnowledge(matches) {
+				return RAGSearchResult{}, matches, false, "hit", nil
+			}
+			return usableRAGMatches(matches)[0], matches, true, "hit", nil
+		}
+		if err != nil {
+			cacheStatus = "error"
+		}
+	}
+
 	// Python 负责 embedding + Milvus 召回；Gateway 根据 chunk_id 回查 MySQL 取完整知识内容。
 	response, err := s.aiClient.SearchVectors(ctx, ai.VectorSearchRequest{Query: query, TopK: topK})
 	if err != nil {
-		return RAGSearchResult{}, nil, false, err
+		return RAGSearchResult{}, nil, false, cacheStatus, err
 	}
 	if len(response.Items) == 0 {
-		return RAGSearchResult{}, []RAGSearchResult{}, false, nil
+		matches := []RAGSearchResult{}
+		s.setRAGCache(ctx, query, topK, matches)
+		return RAGSearchResult{}, matches, false, cacheStatus, nil
 	}
 
 	chunkIDs := make([]string, 0, len(response.Items))
@@ -585,7 +634,7 @@ func (s *Service) searchRAG(ctx context.Context, query string, topK int) (RAGSea
 	}
 	records, err := s.store.GetKnowledgeByChunkIDs(ctx, chunkIDs)
 	if err != nil {
-		return RAGSearchResult{}, nil, false, err
+		return RAGSearchResult{}, nil, false, cacheStatus, err
 	}
 
 	matches := make([]RAGSearchResult, 0, len(response.Items))
@@ -602,10 +651,32 @@ func (s *Service) searchRAG(ctx context.Context, query string, topK int) (RAGSea
 		matches = append(matches, result)
 	}
 	matched := ragHasUsableKnowledge(matches)
+	s.setRAGCache(ctx, query, topK, matches)
 	if !matched {
-		return RAGSearchResult{}, matches, false, nil
+		return RAGSearchResult{}, matches, false, cacheStatus, nil
 	}
-	return matches[0], matches, true, nil
+	return matches[0], matches, true, cacheStatus, nil
+}
+
+func (s *Service) setRAGCache(ctx context.Context, query string, topK int, matches []RAGSearchResult) {
+	if s.ragCache == nil {
+		return
+	}
+	_ = s.ragCache.Set(ctx, query, topK, matches)
+}
+
+func (s *Service) clearRAGCache(ctx context.Context) {
+	if s.ragCache == nil {
+		return
+	}
+	_ = s.ragCache.Clear(ctx)
+}
+
+func withCacheStatus(detail string, status string) string {
+	if strings.TrimSpace(status) == "" {
+		return detail
+	}
+	return fmt.Sprintf("%s，cache=%s", detail, status)
 }
 
 const (
@@ -668,6 +739,28 @@ func citationsFromRetrievedDocs(docs []ai.RetrievedDocument) []CitationRecord {
 		})
 	}
 	return citations
+}
+
+func applyValidationAction(response SendMessageResponse, validation responseValidationResult) SendMessageResponse {
+	switch validation.Action {
+	case "handoff":
+		response.ResponseType = "handoff"
+		response.Content = responseContent("这个问题需要人工客服核实处理，我已经为您转人工。", []string{"补充问题描述", "上传截图", "等待人工客服"})
+		response.Handoff = HandoffDecision{Required: true, Reason: validation.Reason}
+		response.Intent = firstNonEmpty(response.Intent, "response_validation_handoff")
+		response.Route = "validator_handoff"
+		response.RiskLevel = "high"
+		response.Citations = nil
+	case "fallback":
+		response.ResponseType = "answer"
+		response.Content = responseContent(validatorFallbackReply, []string{"继续描述问题", "转人工"})
+		response.Handoff = HandoffDecision{Required: false}
+		response.Intent = firstNonEmpty(response.Intent, "response_validation_fallback")
+		response.Route = "validator_fallback"
+		response.RiskLevel = "low"
+		response.Citations = nil
+	}
+	return response
 }
 
 func (s *Service) ListRAGEvalCases(ctx context.Context) ([]RAGEvalCaseRecord, error) {
@@ -762,6 +855,40 @@ func (s *Service) saveTraceError(ctx context.Context, trace *traceRecorder, err 
 	trace.record.ErrorMessage = err.Error()
 	trace.record.TotalLatencyMS = elapsedMilliseconds(trace.startedAt)
 	s.emitTrace(trace)
+}
+
+func (s *Service) loadSessionMemory(ctx context.Context, conversationID string) (SessionMemoryRecord, string) {
+	if s.sessionMemory == nil {
+		return SessionMemoryRecord{ConversationID: conversationID}, "disabled"
+	}
+	record, hit, err := s.sessionMemory.Get(ctx, conversationID)
+	if err != nil {
+		return SessionMemoryRecord{ConversationID: conversationID}, "error"
+	}
+	if !hit {
+		return SessionMemoryRecord{ConversationID: conversationID}, "miss"
+	}
+	if record.ConversationID == "" {
+		record.ConversationID = conversationID
+	}
+	return record, "hit"
+}
+
+func (s *Service) saveSessionMemory(ctx context.Context, memory SessionMemoryRecord, request SendMessageRequest, response SendMessageResponse, trace *traceRecorder) {
+	if s.sessionMemory == nil {
+		return
+	}
+	stageStarted := time.Now()
+	record := nextSessionMemory(memory, request, response)
+	if err := s.sessionMemory.Set(ctx, record); err != nil {
+		if trace != nil {
+			trace.stage("session_memory_write", "error", stageStarted, err.Error())
+		}
+		return
+	}
+	if trace != nil {
+		trace.stage("session_memory_write", "ok", stageStarted, fmt.Sprintf("history=%d", len(record.Messages)))
+	}
 }
 
 func (s *Service) emitTrace(trace *traceRecorder) {
