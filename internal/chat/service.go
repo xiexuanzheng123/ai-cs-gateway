@@ -625,7 +625,7 @@ func (s *Service) searchRAG(ctx context.Context, query string, topK int) (RAGSea
 		return RAGSearchResult{}, nil, false, cacheStatus, err
 	}
 	if len(response.Items) == 0 {
-		matches := mergeRAGMatches(nil, keywordMatches, topK)
+		matches := mergeRAGMatches(query, nil, keywordMatches, topK)
 		s.setRAGCache(ctx, query, topK, matches)
 		return RAGSearchResult{}, matches, false, cacheStatus, nil
 	}
@@ -657,7 +657,7 @@ func (s *Service) searchRAG(ctx context.Context, query string, topK int) (RAGSea
 		result.Source = "vector"
 		matches = append(matches, result)
 	}
-	matches = mergeRAGMatches(matches, keywordMatches, topK)
+	matches = mergeRAGMatches(query, matches, keywordMatches, topK)
 	matched := ragHasUsableKnowledge(matches)
 	s.setRAGCache(ctx, query, topK, matches)
 	if !matched {
@@ -689,6 +689,7 @@ func withCacheStatus(detail string, status string) string {
 
 const (
 	ragMinScore                 = 0.78
+	ragStrongTextMinScore       = 0.74
 	ragNoKnowledgeFallbackReply = "抱歉，暂未在知识库中查到与您问题直接相关的内容。您可以换个方式描述问题，或选择转人工客服为您处理。"
 )
 
@@ -700,19 +701,22 @@ func ragHasUsableKnowledge(matches []RAGSearchResult) bool {
 	if len(matches) == 0 {
 		return false
 	}
-	if matches[0].Score < ragMinScore {
+	if strings.TrimSpace(ragPassageText(matches[0])) == "" {
 		return false
 	}
-	return strings.TrimSpace(ragPassageText(matches[0])) != ""
+	if matches[0].Score >= ragMinScore {
+		return true
+	}
+	return matches[0].Score >= ragStrongTextMinScore && hasStrongTextEvidence(matches[0])
 }
 
 func usableRAGMatches(matches []RAGSearchResult) []RAGSearchResult {
 	usable := make([]RAGSearchResult, 0, len(matches))
 	for _, match := range matches {
-		if match.Score < ragMinScore {
+		if strings.TrimSpace(ragPassageText(match)) == "" {
 			continue
 		}
-		if strings.TrimSpace(ragPassageText(match)) == "" {
+		if match.Score < ragMinScore && !(match.Score >= ragStrongTextMinScore && hasStrongTextEvidence(match)) {
 			continue
 		}
 		usable = append(usable, match)
@@ -720,7 +724,7 @@ func usableRAGMatches(matches []RAGSearchResult) []RAGSearchResult {
 	return usable
 }
 
-func mergeRAGMatches(vectorMatches []RAGSearchResult, keywordMatches []RAGSearchResult, limit int) []RAGSearchResult {
+func mergeRAGMatches(query string, vectorMatches []RAGSearchResult, keywordMatches []RAGSearchResult, limit int) []RAGSearchResult {
 	if limit <= 0 {
 		limit = 3
 	}
@@ -758,7 +762,7 @@ func mergeRAGMatches(vectorMatches []RAGSearchResult, keywordMatches []RAGSearch
 
 	results := make([]RAGSearchResult, 0, len(merged))
 	for _, key := range order {
-		results = append(results, merged[key])
+		results = append(results, rerankRAGMatch(query, merged[key]))
 	}
 	sort.SliceStable(results, func(i int, j int) bool {
 		return results[i].Score > results[j].Score
@@ -767,6 +771,61 @@ func mergeRAGMatches(vectorMatches []RAGSearchResult, keywordMatches []RAGSearch
 		return results[:limit]
 	}
 	return results
+}
+
+func rerankRAGMatch(query string, match RAGSearchResult) RAGSearchResult {
+	keywords := keywordTerms(query)
+	if len(keywords) == 0 {
+		return match
+	}
+	score := match.Score
+	title := normalizeRAGText(match.Title)
+	content := normalizeRAGText(firstNonEmpty(match.ChunkText, match.Content))
+	queryText := normalizeRAGText(query)
+	titleHits := 0
+	contentHits := 0
+	for _, keyword := range keywords {
+		keyword = normalizeRAGText(keyword)
+		if keyword == "" {
+			continue
+		}
+		if strings.Contains(title, keyword) {
+			titleHits++
+			score += 0.045
+			continue
+		}
+		if strings.Contains(content, keyword) {
+			contentHits++
+			score += 0.025
+		}
+	}
+	if title != "" && strings.Contains(queryText, title) {
+		score += 0.06
+	}
+	if titleHits >= 2 {
+		score += 0.04
+	}
+	if titleHits > 0 && contentHits > 0 {
+		score += 0.025
+	}
+	if match.Source == "hybrid" {
+		score += 0.035
+	}
+	if score > 0.99 {
+		score = 0.99
+	}
+	match.Score = score
+	return match
+}
+
+func hasStrongTextEvidence(match RAGSearchResult) bool {
+	return match.Source == "keyword" || match.Source == "hybrid" || strings.TrimSpace(match.Title) != ""
+}
+
+func normalizeRAGText(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	replacer := strings.NewReplacer(" ", "", "\t", "", "\n", "", "\r", "", "？", "", "?", "", "，", "", ",", "", "。", "", ".", "", "、", "")
+	return replacer.Replace(value)
 }
 
 func keywordTerms(query string) []string {
