@@ -12,6 +12,13 @@ type MySQLStore struct {
 	db *sql.DB
 }
 
+func nullParentID(parentID int64) sql.NullInt64 {
+	if parentID <= 0 {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: parentID, Valid: true}
+}
+
 func NewMySQLStore(db *sql.DB) *MySQLStore {
 	return &MySQLStore{db: db}
 }
@@ -88,6 +95,10 @@ func (s *MySQLStore) SaveTraceLog(ctx context.Context, record TraceLogRecord) er
 	if err != nil {
 		return fmt.Errorf("marshal trace rag matches: %w", err)
 	}
+	citationsJSON, err := json.Marshal(record.Citations)
+	if err != nil {
+		return fmt.Errorf("marshal trace citations: %w", err)
+	}
 
 	_, err = s.db.ExecContext(
 		ctx,
@@ -95,8 +106,8 @@ func (s *MySQLStore) SaveTraceLog(ctx context.Context, record TraceLogRecord) er
 		 (trace_id, conversation_id, message_id, user_id, channel, message_type,
 		  user_message, response_text, intent, route, response_type, risk_level,
 		  handoff_required, handoff_reason, model_used, total_latency_ms,
-		  stages, rag_matches, error_message)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		  stages, rag_matches, citations, error_message)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON DUPLICATE KEY UPDATE
 		  response_text = VALUES(response_text),
 		  intent = VALUES(intent),
@@ -109,6 +120,7 @@ func (s *MySQLStore) SaveTraceLog(ctx context.Context, record TraceLogRecord) er
 		  total_latency_ms = VALUES(total_latency_ms),
 		  stages = VALUES(stages),
 		  rag_matches = VALUES(rag_matches),
+		  citations = VALUES(citations),
 		  error_message = VALUES(error_message)`,
 		record.TraceID,
 		record.ConversationID,
@@ -128,6 +140,7 @@ func (s *MySQLStore) SaveTraceLog(ctx context.Context, record TraceLogRecord) er
 		record.TotalLatencyMS,
 		string(stagesJSON),
 		string(ragMatchesJSON),
+		string(citationsJSON),
 		record.ErrorMessage,
 	)
 	if err != nil {
@@ -148,7 +161,8 @@ func (s *MySQLStore) ListTraceLogs(ctx context.Context, limit int) ([]TraceLogRe
 		        COALESCE(route, ''), COALESCE(response_type, ''), COALESCE(risk_level, ''),
 		        handoff_required, COALESCE(handoff_reason, ''), COALESCE(model_used, ''),
 		        COALESCE(total_latency_ms, 0), COALESCE(stages, JSON_ARRAY()),
-		        COALESCE(rag_matches, JSON_ARRAY()), COALESCE(error_message, ''),
+		        COALESCE(rag_matches, JSON_ARRAY()), COALESCE(citations, JSON_ARRAY()),
+		        COALESCE(error_message, ''),
 		        DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s')
 		 FROM cs_trace_log
 		 ORDER BY id DESC
@@ -165,6 +179,7 @@ func (s *MySQLStore) ListTraceLogs(ctx context.Context, limit int) ([]TraceLogRe
 		var record TraceLogRecord
 		var stagesRaw string
 		var ragMatchesRaw string
+		var citationsRaw string
 		if err := rows.Scan(
 			&record.ID,
 			&record.TraceID,
@@ -185,6 +200,7 @@ func (s *MySQLStore) ListTraceLogs(ctx context.Context, limit int) ([]TraceLogRe
 			&record.TotalLatencyMS,
 			&stagesRaw,
 			&ragMatchesRaw,
+			&citationsRaw,
 			&record.ErrorMessage,
 			&record.CreatedAt,
 		); err != nil {
@@ -192,6 +208,7 @@ func (s *MySQLStore) ListTraceLogs(ctx context.Context, limit int) ([]TraceLogRe
 		}
 		_ = json.Unmarshal([]byte(stagesRaw), &record.Stages)
 		_ = json.Unmarshal([]byte(ragMatchesRaw), &record.RAGMatches)
+		_ = json.Unmarshal([]byte(citationsRaw), &record.Citations)
 		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {
@@ -443,6 +460,146 @@ func (s *MySQLStore) GetDashboardStats(ctx context.Context) (DashboardStats, err
 	return stats, nil
 }
 
+func (s *MySQLStore) ListCategories(ctx context.Context) ([]CategoryRecord, error) {
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT c.id, COALESCE(c.parent_id, 0), c.name, c.level, c.path, c.sort_order,
+		        COUNT(child.id) AS child_count
+		 FROM cs_category c
+		 LEFT JOIN cs_category child ON child.parent_id = c.id
+		 GROUP BY c.id, c.parent_id, c.name, c.level, c.path, c.sort_order
+		 ORDER BY c.path, c.sort_order, c.id`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list categories: %w", err)
+	}
+	defer rows.Close()
+
+	records := []CategoryRecord{}
+	for rows.Next() {
+		var record CategoryRecord
+		if err := rows.Scan(
+			&record.ID,
+			&record.ParentID,
+			&record.Name,
+			&record.Level,
+			&record.Path,
+			&record.SortOrder,
+			&record.ChildCount,
+		); err != nil {
+			return nil, fmt.Errorf("scan category: %w", err)
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate categories: %w", err)
+	}
+	return records, nil
+}
+
+func (s *MySQLStore) CreateCategory(ctx context.Context, record CategoryRecord) (CategoryRecord, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return CategoryRecord{}, fmt.Errorf("begin create category: %w", err)
+	}
+	defer tx.Rollback()
+
+	level := 1
+	parentPath := ""
+	if record.ParentID > 0 {
+		if err := tx.QueryRowContext(ctx, `SELECT level, path FROM cs_category WHERE id = ?`, record.ParentID).Scan(&level, &parentPath); err != nil {
+			return CategoryRecord{}, fmt.Errorf("get parent category: %w", err)
+		}
+		level++
+		if level > 3 {
+			return CategoryRecord{}, fmt.Errorf("category level cannot exceed 3")
+		}
+	}
+
+	result, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO cs_category (parent_id, name, level, path, sort_order)
+		 VALUES (?, ?, ?, '', ?)`,
+		nullParentID(record.ParentID),
+		record.Name,
+		level,
+		record.SortOrder,
+	)
+	if err != nil {
+		return CategoryRecord{}, fmt.Errorf("create category: %w", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return CategoryRecord{}, fmt.Errorf("get category id: %w", err)
+	}
+	path := fmt.Sprintf("/%d", id)
+	if parentPath != "" {
+		path = fmt.Sprintf("%s/%d", parentPath, id)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE cs_category SET path = ? WHERE id = ?`, path, id); err != nil {
+		return CategoryRecord{}, fmt.Errorf("update category path: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return CategoryRecord{}, fmt.Errorf("commit category: %w", err)
+	}
+
+	record.ID = id
+	record.Level = level
+	record.Path = path
+	return record, nil
+}
+
+func (s *MySQLStore) UpdateCategory(ctx context.Context, record CategoryRecord) (CategoryRecord, error) {
+	result, err := s.db.ExecContext(
+		ctx,
+		`UPDATE cs_category SET name = ?, sort_order = ? WHERE id = ?`,
+		record.Name,
+		record.SortOrder,
+		record.ID,
+	)
+	if err != nil {
+		return CategoryRecord{}, fmt.Errorf("update category: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return CategoryRecord{}, fmt.Errorf("get category affected rows: %w", err)
+	}
+	if affected == 0 {
+		return CategoryRecord{}, fmt.Errorf("category not found")
+	}
+	if err := s.db.QueryRowContext(
+		ctx,
+		`SELECT id, COALESCE(parent_id, 0), name, level, path, sort_order
+		 FROM cs_category WHERE id = ?`,
+		record.ID,
+	).Scan(&record.ID, &record.ParentID, &record.Name, &record.Level, &record.Path, &record.SortOrder); err != nil {
+		return CategoryRecord{}, fmt.Errorf("get updated category: %w", err)
+	}
+	return record, nil
+}
+
+func (s *MySQLStore) DeleteCategory(ctx context.Context, id int64) error {
+	var childCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM cs_category WHERE parent_id = ?`, id).Scan(&childCount); err != nil {
+		return fmt.Errorf("count child categories: %w", err)
+	}
+	if childCount > 0 {
+		return fmt.Errorf("category has child categories")
+	}
+	result, err := s.db.ExecContext(ctx, `DELETE FROM cs_category WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete category: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("get category delete affected rows: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("category not found")
+	}
+	return nil
+}
+
 func (s *MySQLStore) ListKnowledge(ctx context.Context) ([]KnowledgeRecord, error) {
 	rows, err := s.db.QueryContext(
 		ctx,
@@ -526,7 +683,13 @@ func (s *MySQLStore) UpdateKnowledge(ctx context.Context, record KnowledgeRecord
 		return KnowledgeRecord{}, fmt.Errorf("get knowledge affected rows: %w", err)
 	}
 	if affected == 0 {
-		return KnowledgeRecord{}, fmt.Errorf("knowledge not found")
+		var exists int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM cs_knowledge WHERE id = ?`, record.ID).Scan(&exists); err != nil {
+			return KnowledgeRecord{}, fmt.Errorf("check knowledge existence: %w", err)
+		}
+		if exists == 0 {
+			return KnowledgeRecord{}, fmt.Errorf("knowledge not found")
+		}
 	}
 	return record, nil
 }

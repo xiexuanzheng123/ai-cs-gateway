@@ -17,6 +17,12 @@ type MessageRecord struct {
 	Content        string
 }
 
+type CitationRecord struct {
+	DocID string  `json:"doc_id"`
+	Title string  `json:"title"`
+	Score float64 `json:"score"`
+}
+
 type AIEventRecord struct {
 	TraceID         string
 	ConversationID  string
@@ -57,6 +63,7 @@ type TraceLogRecord struct {
 	TotalLatencyMS  int                `json:"total_latency_ms"`
 	Stages          []TraceStageRecord `json:"stages"`
 	RAGMatches      []RAGSearchResult  `json:"rag_matches"`
+	Citations       []CitationRecord   `json:"citations"`
 	ErrorMessage    string             `json:"error_message"`
 	CreatedAt       string             `json:"created_at"`
 }
@@ -119,6 +126,16 @@ type KnowledgeRecord struct {
 	Status      string `json:"status"`
 }
 
+type CategoryRecord struct {
+	ID         int64  `json:"id"`
+	ParentID   int64  `json:"parent_id"`
+	Name       string `json:"name"`
+	Level      int    `json:"level"`
+	Path       string `json:"path"`
+	SortOrder  int    `json:"sort_order"`
+	ChildCount int    `json:"child_count"`
+}
+
 type KnowledgeChunkRecord struct {
 	ChunkID     string `json:"chunk_id"`
 	KnowledgeID string `json:"knowledge_id"`
@@ -170,6 +187,10 @@ type Store interface {
 	ListFeatureFlags(ctx context.Context) ([]FeatureFlagRecord, error)
 	SetFeatureFlag(ctx context.Context, key string, enabled bool) (FeatureFlagRecord, error)
 	GetDashboardStats(ctx context.Context) (DashboardStats, error)
+	ListCategories(ctx context.Context) ([]CategoryRecord, error)
+	CreateCategory(ctx context.Context, record CategoryRecord) (CategoryRecord, error)
+	UpdateCategory(ctx context.Context, record CategoryRecord) (CategoryRecord, error)
+	DeleteCategory(ctx context.Context, id int64) error
 	ListKnowledge(ctx context.Context) ([]KnowledgeRecord, error)
 	CreateKnowledge(ctx context.Context, record KnowledgeRecord) (KnowledgeRecord, error)
 	UpdateKnowledge(ctx context.Context, record KnowledgeRecord) (KnowledgeRecord, error)
@@ -246,6 +267,22 @@ func (NoopStore) SetFeatureFlag(ctx context.Context, key string, enabled bool) (
 
 func (NoopStore) GetDashboardStats(ctx context.Context) (DashboardStats, error) {
 	return DashboardStats{}, nil
+}
+
+func (NoopStore) ListCategories(ctx context.Context) ([]CategoryRecord, error) {
+	return []CategoryRecord{}, nil
+}
+
+func (NoopStore) CreateCategory(ctx context.Context, record CategoryRecord) (CategoryRecord, error) {
+	return record, nil
+}
+
+func (NoopStore) UpdateCategory(ctx context.Context, record CategoryRecord) (CategoryRecord, error) {
+	return record, nil
+}
+
+func (NoopStore) DeleteCategory(ctx context.Context, id int64) error {
+	return nil
 }
 
 func (NoopStore) ListKnowledge(ctx context.Context) ([]KnowledgeRecord, error) {

@@ -21,15 +21,16 @@ type SendMessageRequest struct {
 }
 
 type SendMessageResponse struct {
-	TraceID        string          `json:"trace_id"`
-	ConversationID string          `json:"conversation_id"`
-	ResponseType   string          `json:"response_type"`
-	Content        ResponseContent `json:"content"`
-	Handoff        HandoffDecision `json:"handoff"`
-	Intent         string          `json:"intent"`
-	Route          string          `json:"route"`
-	RiskLevel      string          `json:"risk_level"`
-	MessageID      string          `json:"message_id"`
+	TraceID        string           `json:"trace_id"`
+	ConversationID string           `json:"conversation_id"`
+	ResponseType   string           `json:"response_type"`
+	Content        ResponseContent  `json:"content"`
+	Handoff        HandoffDecision  `json:"handoff"`
+	Intent         string           `json:"intent"`
+	Route          string           `json:"route"`
+	RiskLevel      string           `json:"risk_level"`
+	Citations      []CitationRecord `json:"citations"`
+	MessageID      string           `json:"message_id"`
 }
 
 type ResponseContent struct {
@@ -81,6 +82,12 @@ type RuleConfigRequest struct {
 	Priority    int    `json:"priority"`
 	Enabled     bool   `json:"enabled"`
 	Description string `json:"description"`
+}
+
+type CategoryRequest struct {
+	ParentID  int64  `json:"parent_id"`
+	Name      string `json:"name" binding:"required"`
+	SortOrder int    `json:"sort_order"`
 }
 
 type KnowledgeRequest struct {
@@ -145,6 +152,7 @@ func (r *traceRecorder) finish(response SendMessageResponse, model string, total
 	r.record.HandoffReason = response.Handoff.Reason
 	r.record.ModelUsed = model
 	r.record.TotalLatencyMS = totalLatencyMS
+	r.record.Citations = response.Citations
 }
 
 func NewService(aiClient AIClient, riskRouter *routing.RiskRouter, store Store) *Service {
@@ -274,10 +282,10 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 
 	stageStarted = time.Now()
 	aiResponse, err := s.aiClient.Reply(ctx, ai.ReplyRequest{
-		SessionID:       conversationID,
-		UserID:          request.UserID,
-		Message:         request.Message,
-		History:         []ai.HistoryItem{},
+		SessionID: conversationID,
+		UserID:    request.UserID,
+		Message:   request.Message,
+		History:   []ai.HistoryItem{},
 		BusinessContext: map[string]any{
 			"retrieved_passages": buildRetrievedPassages(usableMatches),
 		},
@@ -298,6 +306,7 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 		Intent:         aiResponse.Intent,
 		Route:          firstNonEmpty(aiResponse.Route, "rag_llm"),
 		RiskLevel:      aiResponse.RiskLevel,
+		Citations:      citationsFromRetrievedDocs(aiResponse.RetrievedDocs),
 		MessageID:      request.MessageID,
 	}
 	// 主业务消息仍同步落库，保证会话记录完整；观测日志单独异步写。
@@ -415,6 +424,38 @@ func (s *Service) ListFeatureFlags(ctx context.Context) ([]FeatureFlagRecord, er
 
 func (s *Service) SetFeatureFlag(ctx context.Context, key string, enabled bool) (FeatureFlagRecord, error) {
 	return s.store.SetFeatureFlag(ctx, key, enabled)
+}
+
+func (s *Service) ListCategories(ctx context.Context) ([]CategoryRecord, error) {
+	return s.store.ListCategories(ctx)
+}
+
+func (s *Service) CreateCategory(ctx context.Context, request CategoryRequest) (CategoryRecord, error) {
+	name := strings.TrimSpace(request.Name)
+	if name == "" {
+		return CategoryRecord{}, fmt.Errorf("category name is required")
+	}
+	return s.store.CreateCategory(ctx, CategoryRecord{
+		ParentID:  request.ParentID,
+		Name:      name,
+		SortOrder: request.SortOrder,
+	})
+}
+
+func (s *Service) UpdateCategory(ctx context.Context, id int64, request CategoryRequest) (CategoryRecord, error) {
+	name := strings.TrimSpace(request.Name)
+	if name == "" {
+		return CategoryRecord{}, fmt.Errorf("category name is required")
+	}
+	return s.store.UpdateCategory(ctx, CategoryRecord{
+		ID:        id,
+		Name:      name,
+		SortOrder: request.SortOrder,
+	})
+}
+
+func (s *Service) DeleteCategory(ctx context.Context, id int64) error {
+	return s.store.DeleteCategory(ctx, id)
 }
 
 func (s *Service) ListKnowledge(ctx context.Context) ([]KnowledgeRecord, error) {
@@ -568,8 +609,8 @@ func (s *Service) searchRAG(ctx context.Context, query string, topK int) (RAGSea
 }
 
 const (
-	ragMinScore                   = 0.78
-	ragNoKnowledgeFallbackReply   = "抱歉，暂未在知识库中查到与您问题直接相关的内容。您可以换个方式描述问题，或选择转人工客服为您处理。"
+	ragMinScore                 = 0.78
+	ragNoKnowledgeFallbackReply = "抱歉，暂未在知识库中查到与您问题直接相关的内容。您可以换个方式描述问题，或选择转人工客服为您处理。"
 )
 
 func ragPassageText(result RAGSearchResult) string {
@@ -612,6 +653,21 @@ func buildRetrievedPassages(matches []RAGSearchResult) []map[string]any {
 		})
 	}
 	return passages
+}
+
+func citationsFromRetrievedDocs(docs []ai.RetrievedDocument) []CitationRecord {
+	citations := make([]CitationRecord, 0, len(docs))
+	for _, doc := range docs {
+		if strings.TrimSpace(doc.DocID) == "" {
+			continue
+		}
+		citations = append(citations, CitationRecord{
+			DocID: doc.DocID,
+			Title: doc.Title,
+			Score: doc.Score,
+		})
+	}
+	return citations
 }
 
 func (s *Service) ListRAGEvalCases(ctx context.Context) ([]RAGEvalCaseRecord, error) {

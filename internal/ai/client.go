@@ -29,12 +29,19 @@ type ReplyRequest struct {
 }
 
 type ReplyResponse struct {
-	Reply           string   `json:"reply"`
-	Intent          string   `json:"intent"`
-	Route           string   `json:"route"`
-	RiskLevel       string   `json:"risk_level"`
-	TransferToHuman bool     `json:"transfer_to_human"`
-	Suggestions     []string `json:"suggestions"`
+	Reply           string              `json:"reply"`
+	Intent          string              `json:"intent"`
+	Route           string              `json:"route"`
+	RiskLevel       string              `json:"risk_level"`
+	TransferToHuman bool                `json:"transfer_to_human"`
+	RetrievedDocs   []RetrievedDocument `json:"retrieved_docs"`
+	Suggestions     []string            `json:"suggestions"`
+}
+
+type RetrievedDocument struct {
+	DocID string  `json:"doc_id"`
+	Title string  `json:"title"`
+	Score float64 `json:"score"`
 }
 
 type VectorChunk struct {

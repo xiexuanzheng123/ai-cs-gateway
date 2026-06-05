@@ -171,6 +171,69 @@ func (h *Handler) SetFeatureFlag(c *gin.Context) {
 	c.JSON(http.StatusOK, flag)
 }
 
+func (h *Handler) ListCategories(c *gin.Context) {
+	records, err := h.service.ListCategories(c.Request.Context())
+	if err != nil {
+		writeUpstreamError(c, "list_categories_failed", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"categories": records})
+}
+
+func (h *Handler) CreateCategory(c *gin.Context) {
+	var request CategoryRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		writeBadRequest(c, "invalid_category_request", err)
+		return
+	}
+
+	record, err := h.service.CreateCategory(c.Request.Context(), request)
+	if err != nil {
+		writeUpstreamError(c, "create_category_failed", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, record)
+}
+
+func (h *Handler) UpdateCategory(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeBadRequest(c, "invalid_category_id", nil)
+		return
+	}
+
+	var request CategoryRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		writeBadRequest(c, "invalid_category_request", err)
+		return
+	}
+
+	record, err := h.service.UpdateCategory(c.Request.Context(), id, request)
+	if err != nil {
+		writeUpstreamError(c, "update_category_failed", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, record)
+}
+
+func (h *Handler) DeleteCategory(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeBadRequest(c, "invalid_category_id", nil)
+		return
+	}
+
+	if err := h.service.DeleteCategory(c.Request.Context(), id); err != nil {
+		writeUpstreamError(c, "delete_category_failed", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
 func (h *Handler) ListKnowledge(c *gin.Context) {
 	records, err := h.service.ListKnowledge(c.Request.Context())
 	if err != nil {
