@@ -159,6 +159,7 @@ type RAGSearchResult struct {
 	Content     string  `json:"content"`
 	Score       float64 `json:"score"`
 	ChunkText   string  `json:"chunk_text"`
+	Source      string  `json:"source"`
 }
 
 type RAGEvalCaseRecord struct {
@@ -169,6 +170,34 @@ type RAGEvalCaseRecord struct {
 	ExpectedIntent      string `json:"expected_intent"`
 	ShouldAnswer        bool   `json:"should_answer"`
 	Status              string `json:"status"`
+}
+
+type RAGEvalRunRecord struct {
+	ID         int64                  `json:"id"`
+	RunID      string                 `json:"run_id"`
+	Total      int                    `json:"total"`
+	Passed     int                    `json:"passed"`
+	Failed     int                    `json:"failed"`
+	PassRate   float64                `json:"pass_rate"`
+	DurationMS int                    `json:"duration_ms"`
+	Items      []RAGEvalRunItemRecord `json:"items"`
+	CreatedAt  string                 `json:"created_at"`
+}
+
+type RAGEvalRunItemRecord struct {
+	ID                  int64             `json:"id"`
+	RunID               string            `json:"run_id"`
+	CaseID              string            `json:"case_id"`
+	QueryText           string            `json:"query_text"`
+	ExpectedKnowledgeID string            `json:"expected_knowledge_id"`
+	ShouldAnswer        bool              `json:"should_answer"`
+	Matched             bool              `json:"matched"`
+	Passed              bool              `json:"passed"`
+	Reason              string            `json:"reason"`
+	Top1KnowledgeID     string            `json:"top1_knowledge_id"`
+	Top1Score           float64           `json:"top1_score"`
+	Matches             []RAGSearchResult `json:"matches"`
+	DurationMS          int               `json:"duration_ms"`
 }
 
 type Store interface {
@@ -199,9 +228,12 @@ type Store interface {
 	ListKnowledgeChunksWithoutVector(ctx context.Context) ([]KnowledgeChunkRecord, error)
 	UpdateKnowledgeChunkVectorIDs(ctx context.Context, vectorIDs map[string]string) error
 	GetKnowledgeByChunkIDs(ctx context.Context, chunkIDs []string) (map[string]RAGSearchResult, error)
+	SearchKnowledgeByKeyword(ctx context.Context, query string, limit int) ([]RAGSearchResult, error)
 	ListRAGEvalCases(ctx context.Context) ([]RAGEvalCaseRecord, error)
 	CreateRAGEvalCase(ctx context.Context, record RAGEvalCaseRecord) (RAGEvalCaseRecord, error)
 	UpdateRAGEvalCase(ctx context.Context, record RAGEvalCaseRecord) (RAGEvalCaseRecord, error)
+	SaveRAGEvalRun(ctx context.Context, record RAGEvalRunRecord) (RAGEvalRunRecord, error)
+	ListRAGEvalRuns(ctx context.Context, limit int) ([]RAGEvalRunRecord, error)
 }
 
 type NoopStore struct{}
@@ -317,6 +349,10 @@ func (NoopStore) GetKnowledgeByChunkIDs(ctx context.Context, chunkIDs []string) 
 	return map[string]RAGSearchResult{}, nil
 }
 
+func (NoopStore) SearchKnowledgeByKeyword(ctx context.Context, query string, limit int) ([]RAGSearchResult, error) {
+	return []RAGSearchResult{}, nil
+}
+
 func (NoopStore) ListRAGEvalCases(ctx context.Context) ([]RAGEvalCaseRecord, error) {
 	return []RAGEvalCaseRecord{}, nil
 }
@@ -327,4 +363,12 @@ func (NoopStore) CreateRAGEvalCase(ctx context.Context, record RAGEvalCaseRecord
 
 func (NoopStore) UpdateRAGEvalCase(ctx context.Context, record RAGEvalCaseRecord) (RAGEvalCaseRecord, error) {
 	return record, nil
+}
+
+func (NoopStore) SaveRAGEvalRun(ctx context.Context, record RAGEvalRunRecord) (RAGEvalRunRecord, error) {
+	return record, nil
+}
+
+func (NoopStore) ListRAGEvalRuns(ctx context.Context, limit int) ([]RAGEvalRunRecord, error) {
+	return []RAGEvalRunRecord{}, nil
 }

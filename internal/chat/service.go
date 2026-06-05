@@ -5,6 +5,7 @@ import (
 	"ai-cs-gateway/internal/routing"
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -613,13 +614,18 @@ func (s *Service) searchRAG(ctx context.Context, query string, topK int) (RAGSea
 		}
 	}
 
+	keywordMatches, err := s.store.SearchKnowledgeByKeyword(ctx, query, topK)
+	if err != nil {
+		return RAGSearchResult{}, nil, false, cacheStatus, err
+	}
+
 	// Python 负责 embedding + Milvus 召回；Gateway 根据 chunk_id 回查 MySQL 取完整知识内容。
 	response, err := s.aiClient.SearchVectors(ctx, ai.VectorSearchRequest{Query: query, TopK: topK})
 	if err != nil {
 		return RAGSearchResult{}, nil, false, cacheStatus, err
 	}
 	if len(response.Items) == 0 {
-		matches := []RAGSearchResult{}
+		matches := mergeRAGMatches(nil, keywordMatches, topK)
 		s.setRAGCache(ctx, query, topK, matches)
 		return RAGSearchResult{}, matches, false, cacheStatus, nil
 	}
@@ -648,8 +654,10 @@ func (s *Service) searchRAG(ctx context.Context, query string, topK int) (RAGSea
 		}
 		result.Score = scores[item.ChunkID]
 		result.ChunkText = firstNonEmpty(chunkText[item.ChunkID], result.ChunkText)
+		result.Source = "vector"
 		matches = append(matches, result)
 	}
+	matches = mergeRAGMatches(matches, keywordMatches, topK)
 	matched := ragHasUsableKnowledge(matches)
 	s.setRAGCache(ctx, query, topK, matches)
 	if !matched {
@@ -712,6 +720,100 @@ func usableRAGMatches(matches []RAGSearchResult) []RAGSearchResult {
 	return usable
 }
 
+func mergeRAGMatches(vectorMatches []RAGSearchResult, keywordMatches []RAGSearchResult, limit int) []RAGSearchResult {
+	if limit <= 0 {
+		limit = 3
+	}
+	merged := map[string]RAGSearchResult{}
+	order := []string{}
+	add := func(match RAGSearchResult) {
+		key := firstNonEmpty(match.ChunkID, match.KnowledgeID)
+		if key == "" {
+			return
+		}
+		existing, exists := merged[key]
+		if !exists {
+			merged[key] = match
+			order = append(order, key)
+			return
+		}
+		if match.Score > existing.Score {
+			if existing.Source != "" && match.Source != existing.Source {
+				match.Source = "hybrid"
+			}
+			merged[key] = match
+			return
+		}
+		if existing.Source != "" && match.Source != "" && existing.Source != match.Source {
+			existing.Source = "hybrid"
+			merged[key] = existing
+		}
+	}
+	for _, match := range vectorMatches {
+		add(match)
+	}
+	for _, match := range keywordMatches {
+		add(match)
+	}
+
+	results := make([]RAGSearchResult, 0, len(merged))
+	for _, key := range order {
+		results = append(results, merged[key])
+	}
+	sort.SliceStable(results, func(i int, j int) bool {
+		return results[i].Score > results[j].Score
+	})
+	if len(results) > limit {
+		return results[:limit]
+	}
+	return results
+}
+
+func keywordTerms(query string) []string {
+	fields := strings.FieldsFunc(strings.TrimSpace(query), func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == ',' || r == '，' || r == '、' || r == '?' || r == '？'
+	})
+	terms := make([]string, 0, len(fields))
+	for _, field := range fields {
+		term := strings.TrimSpace(field)
+		if utf8.RuneCountInString(term) < 2 {
+			continue
+		}
+		terms = append(terms, term)
+		if len(terms) >= 5 {
+			break
+		}
+	}
+	return terms
+}
+
+func keywordOrderArgs(keyword string) []any {
+	like := "%" + keyword + "%"
+	return []any{like, like}
+}
+
+func keywordScore(record RAGSearchResult, keywords []string) float64 {
+	title := strings.ToLower(record.Title)
+	content := strings.ToLower(record.Content)
+	chunkText := strings.ToLower(record.ChunkText)
+	score := 0.80
+	for _, keyword := range keywords {
+		keyword = strings.ToLower(keyword)
+		switch {
+		case strings.Contains(title, keyword):
+			score += 0.08
+		case strings.Contains(chunkText, keyword):
+			score += 0.05
+		case strings.Contains(content, keyword):
+			score += 0.03
+		}
+	}
+	if score > 0.96 {
+		return 0.96
+	}
+	return score
+}
+
 func buildRetrievedPassages(matches []RAGSearchResult) []map[string]any {
 	passages := make([]map[string]any, 0, len(matches))
 	for _, match := range matches {
@@ -720,6 +822,7 @@ func buildRetrievedPassages(matches []RAGSearchResult) []map[string]any {
 			"chunk_id":     match.ChunkID,
 			"title":        match.Title,
 			"score":        match.Score,
+			"source":       match.Source,
 			"text":         ragPassageText(match),
 		})
 	}
@@ -765,6 +868,10 @@ func applyValidationAction(response SendMessageResponse, validation responseVali
 
 func (s *Service) ListRAGEvalCases(ctx context.Context) ([]RAGEvalCaseRecord, error) {
 	return s.store.ListRAGEvalCases(ctx)
+}
+
+func (s *Service) ListRAGEvalRuns(ctx context.Context, limit int) ([]RAGEvalRunRecord, error) {
+	return s.store.ListRAGEvalRuns(ctx, limit)
 }
 
 func (s *Service) CreateRAGEvalCase(ctx context.Context, request RAGEvalCaseRequest) (RAGEvalCaseRecord, error) {

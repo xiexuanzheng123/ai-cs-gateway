@@ -858,6 +858,69 @@ func (s *MySQLStore) GetKnowledgeByChunkIDs(ctx context.Context, chunkIDs []stri
 	return records, nil
 }
 
+func (s *MySQLStore) SearchKnowledgeByKeyword(ctx context.Context, query string, limit int) ([]RAGSearchResult, error) {
+	keywords := keywordTerms(query)
+	if len(keywords) == 0 {
+		return []RAGSearchResult{}, nil
+	}
+	if limit <= 0 {
+		limit = 3
+	}
+
+	whereParts := make([]string, 0, len(keywords))
+	args := make([]any, 0, len(keywords)*3+3)
+	for _, keyword := range keywords {
+		like := "%" + keyword + "%"
+		whereParts = append(whereParts, "(k.title LIKE ? OR k.content LIKE ? OR c.chunk_text LIKE ?)")
+		args = append(args, like, like, like)
+	}
+	args = append(args, keywordOrderArgs(keywords[0])...)
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT c.chunk_id, c.knowledge_id, k.title, k.content, c.chunk_text
+		 FROM cs_knowledge_chunk c
+		 JOIN cs_knowledge k ON k.knowledge_id = c.knowledge_id
+		 WHERE k.status = 'published' AND (`+strings.Join(whereParts, " OR ")+`)
+		 ORDER BY
+		   CASE
+		     WHEN k.title LIKE ? THEN 0
+		     WHEN c.chunk_text LIKE ? THEN 1
+		     ELSE 2
+		   END,
+		   k.updated_at DESC,
+		   c.id ASC
+		 LIMIT ?`,
+		args...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("search knowledge by keyword: %w", err)
+	}
+	defer rows.Close()
+
+	results := []RAGSearchResult{}
+	for rows.Next() {
+		var record RAGSearchResult
+		if err := rows.Scan(
+			&record.ChunkID,
+			&record.KnowledgeID,
+			&record.Title,
+			&record.Content,
+			&record.ChunkText,
+		); err != nil {
+			return nil, fmt.Errorf("scan keyword knowledge: %w", err)
+		}
+		record.Score = keywordScore(record, keywords)
+		record.Source = "keyword"
+		results = append(results, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate keyword knowledge: %w", err)
+	}
+	return results, nil
+}
+
 func (s *MySQLStore) ListRAGEvalCases(ctx context.Context) ([]RAGEvalCaseRecord, error) {
 	rows, err := s.db.QueryContext(
 		ctx,
@@ -942,4 +1005,179 @@ func (s *MySQLStore) UpdateRAGEvalCase(ctx context.Context, record RAGEvalCaseRe
 		return RAGEvalCaseRecord{}, fmt.Errorf("rag eval case not found")
 	}
 	return record, nil
+}
+
+func (s *MySQLStore) SaveRAGEvalRun(ctx context.Context, record RAGEvalRunRecord) (RAGEvalRunRecord, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return RAGEvalRunRecord{}, fmt.Errorf("begin rag eval run tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO cs_rag_eval_run
+		 (run_id, total, passed, failed, pass_rate, duration_ms)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		record.RunID,
+		record.Total,
+		record.Passed,
+		record.Failed,
+		record.PassRate,
+		record.DurationMS,
+	)
+	if err != nil {
+		return RAGEvalRunRecord{}, fmt.Errorf("save rag eval run: %w", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return RAGEvalRunRecord{}, fmt.Errorf("get rag eval run id: %w", err)
+	}
+	record.ID = id
+
+	for index := range record.Items {
+		item := &record.Items[index]
+		item.RunID = record.RunID
+		matchesJSON, err := json.Marshal(item.Matches)
+		if err != nil {
+			return RAGEvalRunRecord{}, fmt.Errorf("marshal rag eval matches: %w", err)
+		}
+		itemResult, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO cs_rag_eval_run_item
+			 (run_id, case_id, query_text, expected_knowledge_id, should_answer,
+			  matched, passed, reason, top1_knowledge_id, top1_score, matches, duration_ms)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			item.RunID,
+			item.CaseID,
+			item.QueryText,
+			item.ExpectedKnowledgeID,
+			item.ShouldAnswer,
+			item.Matched,
+			item.Passed,
+			item.Reason,
+			item.Top1KnowledgeID,
+			item.Top1Score,
+			string(matchesJSON),
+			item.DurationMS,
+		)
+		if err != nil {
+			return RAGEvalRunRecord{}, fmt.Errorf("save rag eval run item: %w", err)
+		}
+		item.ID, _ = itemResult.LastInsertId()
+	}
+
+	if err := tx.Commit(); err != nil {
+		return RAGEvalRunRecord{}, fmt.Errorf("commit rag eval run: %w", err)
+	}
+	return record, nil
+}
+
+func (s *MySQLStore) ListRAGEvalRuns(ctx context.Context, limit int) ([]RAGEvalRunRecord, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 10
+	}
+
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT id, run_id, total, passed, failed, pass_rate, duration_ms,
+		        DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s')
+		 FROM cs_rag_eval_run
+		 ORDER BY id DESC
+		 LIMIT ?`,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list rag eval runs: %w", err)
+	}
+	defer rows.Close()
+
+	records := []RAGEvalRunRecord{}
+	runIDs := []string{}
+	for rows.Next() {
+		var record RAGEvalRunRecord
+		if err := rows.Scan(
+			&record.ID,
+			&record.RunID,
+			&record.Total,
+			&record.Passed,
+			&record.Failed,
+			&record.PassRate,
+			&record.DurationMS,
+			&record.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan rag eval run: %w", err)
+		}
+		records = append(records, record)
+		runIDs = append(runIDs, record.RunID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rag eval runs: %w", err)
+	}
+	if len(runIDs) == 0 {
+		return records, nil
+	}
+
+	itemsByRunID, err := s.listRAGEvalRunItems(ctx, runIDs)
+	if err != nil {
+		return nil, err
+	}
+	for index := range records {
+		records[index].Items = itemsByRunID[records[index].RunID]
+	}
+	return records, nil
+}
+
+func (s *MySQLStore) listRAGEvalRunItems(ctx context.Context, runIDs []string) (map[string][]RAGEvalRunItemRecord, error) {
+	placeholders := make([]string, 0, len(runIDs))
+	args := make([]any, 0, len(runIDs))
+	for _, runID := range runIDs {
+		placeholders = append(placeholders, "?")
+		args = append(args, runID)
+	}
+
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT id, run_id, case_id, query_text, COALESCE(expected_knowledge_id, ''),
+		        should_answer, matched, passed, COALESCE(reason, ''),
+		        COALESCE(top1_knowledge_id, ''), top1_score,
+		        COALESCE(matches, JSON_ARRAY()), duration_ms
+		 FROM cs_rag_eval_run_item
+		 WHERE run_id IN (`+strings.Join(placeholders, ",")+`)
+		 ORDER BY id ASC`,
+		args...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list rag eval run items: %w", err)
+	}
+	defer rows.Close()
+
+	records := map[string][]RAGEvalRunItemRecord{}
+	for rows.Next() {
+		var record RAGEvalRunItemRecord
+		var matchesRaw string
+		if err := rows.Scan(
+			&record.ID,
+			&record.RunID,
+			&record.CaseID,
+			&record.QueryText,
+			&record.ExpectedKnowledgeID,
+			&record.ShouldAnswer,
+			&record.Matched,
+			&record.Passed,
+			&record.Reason,
+			&record.Top1KnowledgeID,
+			&record.Top1Score,
+			&matchesRaw,
+			&record.DurationMS,
+		); err != nil {
+			return nil, fmt.Errorf("scan rag eval run item: %w", err)
+		}
+		_ = json.Unmarshal([]byte(matchesRaw), &record.Matches)
+		records[record.RunID] = append(records[record.RunID], record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rag eval run items: %w", err)
+	}
+	return records, nil
 }
