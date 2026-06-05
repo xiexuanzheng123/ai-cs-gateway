@@ -43,9 +43,9 @@ type ReplyResponse struct {
 }
 
 type RetrievedDocument struct {
-	DocID string  `json:"doc_id"`
-	Title string  `json:"title"`
-	Score float64 `json:"score"`
+	DocID    string  `json:"doc_id"`
+	Question string  `json:"question"`
+	Score    float64 `json:"score"`
 }
 
 type VectorChunk struct {

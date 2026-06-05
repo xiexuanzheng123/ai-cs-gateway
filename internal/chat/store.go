@@ -18,9 +18,9 @@ type MessageRecord struct {
 }
 
 type CitationRecord struct {
-	DocID string  `json:"doc_id"`
-	Title string  `json:"title"`
-	Score float64 `json:"score"`
+	DocID    string  `json:"doc_id"`
+	Question string  `json:"question"`
+	Score    float64 `json:"score"`
 }
 
 type AIEventRecord struct {
@@ -136,7 +136,7 @@ type QualityStats struct {
 type KnowledgeRecord struct {
 	ID          int64  `json:"id"`
 	KnowledgeID string `json:"knowledge_id"`
-	Title       string `json:"title"`
+	Question    string `json:"question"`
 	Content     string `json:"content"`
 	Category    string `json:"category"`
 	Owner       string `json:"owner"`
@@ -147,7 +147,7 @@ type KnowledgeRecord struct {
 type KnowledgeVersionRecord struct {
 	ID          int64  `json:"id"`
 	KnowledgeID string `json:"knowledge_id"`
-	Title       string `json:"title"`
+	Question    string `json:"question"`
 	Content     string `json:"content"`
 	Category    string `json:"category"`
 	Owner       string `json:"owner"`
@@ -186,7 +186,7 @@ type KnowledgeChunkSyncResult struct {
 type RAGSearchResult struct {
 	ChunkID     string  `json:"chunk_id"`
 	KnowledgeID string  `json:"knowledge_id"`
-	Title       string  `json:"title"`
+	Question    string  `json:"question"`
 	Content     string  `json:"content"`
 	Score       float64 `json:"score"`
 	ChunkText   string  `json:"chunk_text"`

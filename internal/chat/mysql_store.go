@@ -680,7 +680,7 @@ func (s *MySQLStore) DeleteCategory(ctx context.Context, id int64) error {
 func (s *MySQLStore) ListKnowledge(ctx context.Context) ([]KnowledgeRecord, error) {
 	rows, err := s.db.QueryContext(
 		ctx,
-		`SELECT id, knowledge_id, title, content, category, COALESCE(owner, ''), version, status
+		`SELECT id, knowledge_id, question, content, category, COALESCE(owner, ''), version, status
 		 FROM cs_knowledge
 		 ORDER BY updated_at DESC, id DESC`,
 	)
@@ -695,7 +695,7 @@ func (s *MySQLStore) ListKnowledge(ctx context.Context) ([]KnowledgeRecord, erro
 		if err := rows.Scan(
 			&record.ID,
 			&record.KnowledgeID,
-			&record.Title,
+			&record.Question,
 			&record.Content,
 			&record.Category,
 			&record.Owner,
@@ -716,10 +716,10 @@ func (s *MySQLStore) CreateKnowledge(ctx context.Context, record KnowledgeRecord
 	result, err := s.db.ExecContext(
 		ctx,
 		`INSERT INTO cs_knowledge
-		 (knowledge_id, title, content, category, owner, version, status)
+		 (knowledge_id, question, content, category, owner, version, status)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		record.KnowledgeID,
-		record.Title,
+		record.Question,
 		record.Content,
 		record.Category,
 		record.Owner,
@@ -744,10 +744,10 @@ func (s *MySQLStore) UpdateKnowledge(ctx context.Context, record KnowledgeRecord
 	result, err := s.db.ExecContext(
 		ctx,
 		`UPDATE cs_knowledge
-		 SET knowledge_id = ?, title = ?, content = ?, category = ?, owner = ?, version = ?, status = ?
+		 SET knowledge_id = ?, question = ?, content = ?, category = ?, owner = ?, version = ?, status = ?
 		 WHERE id = ?`,
 		record.KnowledgeID,
-		record.Title,
+		record.Question,
 		record.Content,
 		record.Category,
 		record.Owner,
@@ -781,14 +781,14 @@ func (s *MySQLStore) GetKnowledgeByID(ctx context.Context, id int64) (KnowledgeR
 	var record KnowledgeRecord
 	err := s.db.QueryRowContext(
 		ctx,
-		`SELECT id, knowledge_id, title, content, category, COALESCE(owner, ''), version, status
+		`SELECT id, knowledge_id, question, content, category, COALESCE(owner, ''), version, status
 		 FROM cs_knowledge
 		 WHERE id = ?`,
 		id,
 	).Scan(
 		&record.ID,
 		&record.KnowledgeID,
-		&record.Title,
+		&record.Question,
 		&record.Content,
 		&record.Category,
 		&record.Owner,
@@ -804,7 +804,7 @@ func (s *MySQLStore) GetKnowledgeByID(ctx context.Context, id int64) (KnowledgeR
 func (s *MySQLStore) ListKnowledgeVersions(ctx context.Context, knowledgeID string) ([]KnowledgeVersionRecord, error) {
 	rows, err := s.db.QueryContext(
 		ctx,
-		`SELECT id, knowledge_id, title, content, category, COALESCE(owner, ''), version, status, change_type,
+		`SELECT id, knowledge_id, question, content, category, COALESCE(owner, ''), version, status, change_type,
 		        DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s')
 		 FROM cs_knowledge_version
 		 WHERE knowledge_id = ?
@@ -822,7 +822,7 @@ func (s *MySQLStore) ListKnowledgeVersions(ctx context.Context, knowledgeID stri
 		if err := rows.Scan(
 			&record.ID,
 			&record.KnowledgeID,
-			&record.Title,
+			&record.Question,
 			&record.Content,
 			&record.Category,
 			&record.Owner,
@@ -845,10 +845,10 @@ func (s *MySQLStore) SaveKnowledgeVersion(ctx context.Context, record KnowledgeR
 	_, err := s.db.ExecContext(
 		ctx,
 		`INSERT INTO cs_knowledge_version
-		 (knowledge_id, title, content, category, owner, version, status, change_type)
+		 (knowledge_id, question, content, category, owner, version, status, change_type)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.KnowledgeID,
-		record.Title,
+		record.Question,
 		record.Content,
 		record.Category,
 		record.Owner,
@@ -1016,7 +1016,7 @@ func (s *MySQLStore) GetKnowledgeByChunkIDs(ctx context.Context, chunkIDs []stri
 	// Milvus 只返回 chunk_id；最终回答内容必须回查 MySQL，保证展示的是业务知识原文。
 	rows, err := s.db.QueryContext(
 		ctx,
-		`SELECT c.chunk_id, c.knowledge_id, k.title, k.content, c.chunk_text
+		`SELECT c.chunk_id, c.knowledge_id, k.question, k.content, c.chunk_text
 		 FROM cs_knowledge_chunk c
 		 JOIN cs_knowledge k ON k.knowledge_id = c.knowledge_id
 		 WHERE c.chunk_id IN (`+placeholders+`)`,
@@ -1033,7 +1033,7 @@ func (s *MySQLStore) GetKnowledgeByChunkIDs(ctx context.Context, chunkIDs []stri
 		if err := rows.Scan(
 			&record.ChunkID,
 			&record.KnowledgeID,
-			&record.Title,
+			&record.Question,
 			&record.Content,
 			&record.ChunkText,
 		); err != nil {
@@ -1060,7 +1060,7 @@ func (s *MySQLStore) SearchKnowledgeByKeyword(ctx context.Context, query string,
 	args := make([]any, 0, len(keywords)*3+3)
 	for _, keyword := range keywords {
 		like := "%" + keyword + "%"
-		whereParts = append(whereParts, "(k.title LIKE ? OR k.content LIKE ? OR c.chunk_text LIKE ?)")
+		whereParts = append(whereParts, "(k.question LIKE ? OR k.content LIKE ? OR c.chunk_text LIKE ?)")
 		args = append(args, like, like, like)
 	}
 	args = append(args, keywordOrderArgs(keywords[0])...)
@@ -1068,13 +1068,13 @@ func (s *MySQLStore) SearchKnowledgeByKeyword(ctx context.Context, query string,
 
 	rows, err := s.db.QueryContext(
 		ctx,
-		`SELECT c.chunk_id, c.knowledge_id, k.title, k.content, c.chunk_text
+		`SELECT c.chunk_id, c.knowledge_id, k.question, k.content, c.chunk_text
 		 FROM cs_knowledge_chunk c
 		 JOIN cs_knowledge k ON k.knowledge_id = c.knowledge_id
 		 WHERE k.status = 'published' AND (`+strings.Join(whereParts, " OR ")+`)
 		 ORDER BY
 		   CASE
-		     WHEN k.title LIKE ? THEN 0
+		     WHEN k.question LIKE ? THEN 0
 		     WHEN c.chunk_text LIKE ? THEN 1
 		     ELSE 2
 		   END,
@@ -1094,7 +1094,7 @@ func (s *MySQLStore) SearchKnowledgeByKeyword(ctx context.Context, query string,
 		if err := rows.Scan(
 			&record.ChunkID,
 			&record.KnowledgeID,
-			&record.Title,
+			&record.Question,
 			&record.Content,
 			&record.ChunkText,
 		); err != nil {

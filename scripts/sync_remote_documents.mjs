@@ -37,7 +37,8 @@ const batchSize = Math.max(1, Math.min(Number(config.batchSize) || 100, 500))
 while (currentOffset < endOffset) {
   const limit = Math.min(batchSize, endOffset - currentOffset)
   const batchIds = idList.length > 0 ? idList.slice(currentOffset, currentOffset + limit) : []
-  const remoteDocuments = fetchRemoteDocuments({ ...config, limit, offset: currentOffset, ids: batchIds.join(',') })
+  const remoteOffset = idList.length > 0 ? 0 : currentOffset
+  const remoteDocuments = fetchRemoteDocuments({ ...config, limit, offset: remoteOffset, ids: batchIds.join(',') })
   if (remoteDocuments.length === 0) break
   console.log(`[batch] offset=${currentOffset} size=${remoteDocuments.length}`)
   for (const document of remoteDocuments) {
@@ -59,7 +60,7 @@ while (currentOffset < endOffset) {
         existingKnowledge.set(input.knowledge_id, created)
         summary.created++
       }
-      console.log(`[ok] ${input.knowledge_id} ${input.title}`)
+      console.log(`[ok] ${input.knowledge_id} ${input.question}`)
     } catch (error) {
       summary.failed++
       summary.failures.push({
@@ -99,7 +100,6 @@ function fetchRemoteDocuments(config) {
   const sql = `
 SELECT JSON_OBJECT(
   'id', id,
-  'title', COALESCE(NULLIF(TRIM(title), ''), NULLIF(TRIM(question), '')),
   'question', question,
   'answer', answer,
   'category', COALESCE(NULLIF(TRIM(category), ''), 'general'),
@@ -159,7 +159,7 @@ async function fetchKnowledgeMap(gatewayBaseUrl) {
 function mapDocumentToKnowledgeInput(document) {
   return {
     knowledge_id: `kb_doc_${document.id}`,
-    title: document.title || document.question,
+    question: document.question,
     content: document.answer,
     category: document.category || 'general',
     owner: document.owner || 'remote_sync',

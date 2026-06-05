@@ -93,7 +93,7 @@ type CategoryRequest struct {
 
 type KnowledgeRequest struct {
 	KnowledgeID string `json:"knowledge_id" binding:"required"`
-	Title       string `json:"title" binding:"required"`
+	Question    string `json:"question" binding:"required"`
 	Content     string `json:"content" binding:"required"`
 	Category    string `json:"category" binding:"required"`
 	Owner       string `json:"owner"`
@@ -565,7 +565,7 @@ func (s *Service) RollbackKnowledge(ctx context.Context, id int64, versionID int
 		record, err := s.store.UpdateKnowledge(ctx, KnowledgeRecord{
 			ID:          id,
 			KnowledgeID: version.KnowledgeID,
-			Title:       version.Title,
+			Question:    version.Question,
 			Content:     version.Content,
 			Category:    version.Category,
 			Owner:       version.Owner,
@@ -646,24 +646,41 @@ func (s *Service) upsertKnowledgeChunks(ctx context.Context, chunks []KnowledgeC
 		})
 	}
 
-	response, err := s.aiClient.UpsertVectors(ctx, ai.VectorUpsertRequest{Chunks: vectorChunks})
-	if err != nil {
-		return 0, "", err
-	}
-
 	vectorIDs := map[string]string{}
-	for _, item := range response.Items {
-		vectorIDs[item.ChunkID] = item.VectorID
+	vectorTotal := 0
+	model := ""
+	for start := 0; start < len(vectorChunks); start += 10 {
+		end := start + 10
+		if end > len(vectorChunks) {
+			end = len(vectorChunks)
+		}
+		response, err := s.aiClient.UpsertVectors(ctx, ai.VectorUpsertRequest{Chunks: vectorChunks[start:end]})
+		if err != nil {
+			return 0, "", err
+		}
+		if model == "" {
+			model = response.Model
+		}
+		vectorTotal += len(response.Items)
+		for _, item := range response.Items {
+			vectorIDs[item.ChunkID] = item.VectorID
+		}
 	}
 	if err := s.store.UpdateKnowledgeChunkVectorIDs(ctx, vectorIDs); err != nil {
 		return 0, "", err
 	}
 
 	// 同一批 chunk 同步写入 OpenSearch，后续 RAG 可走 BM25 + 向量混合召回。
-	if _, err := s.aiClient.UpsertKeywords(ctx, ai.KeywordUpsertRequest{Chunks: vectorChunks}); err != nil {
-		return 0, "", err
+	for start := 0; start < len(vectorChunks); start += 50 {
+		end := start + 50
+		if end > len(vectorChunks) {
+			end = len(vectorChunks)
+		}
+		if _, err := s.aiClient.UpsertKeywords(ctx, ai.KeywordUpsertRequest{Chunks: vectorChunks[start:end]}); err != nil {
+			return 0, "", err
+		}
 	}
-	return len(response.Items), response.Model, nil
+	return vectorTotal, model, nil
 }
 
 func (s *Service) SearchRAG(ctx context.Context, query string, topK int) (RAGSearchResult, bool, error) {
@@ -756,7 +773,7 @@ func (s *Service) rerankRAGMatches(ctx context.Context, query string, matches []
 	byID := make(map[string]RAGSearchResult, limit)
 	for _, match := range matches[:limit] {
 		id := firstNonEmpty(match.ChunkID, match.KnowledgeID)
-		text := strings.TrimSpace(firstNonEmpty(firstNonEmpty(match.ChunkText, match.Content), match.Title))
+		text := strings.TrimSpace(firstNonEmpty(firstNonEmpty(match.ChunkText, match.Content), match.Question))
 		if id == "" || text == "" {
 			continue
 		}
@@ -983,18 +1000,18 @@ func rerankRAGMatch(query string, match RAGSearchResult) RAGSearchResult {
 		return match
 	}
 	score := match.Score
-	title := normalizeRAGText(match.Title)
+	question := normalizeRAGText(match.Question)
 	content := normalizeRAGText(firstNonEmpty(match.ChunkText, match.Content))
 	queryText := normalizeRAGText(query)
-	titleHits := 0
+	questionHits := 0
 	contentHits := 0
 	for _, keyword := range keywords {
 		keyword = normalizeRAGText(keyword)
 		if keyword == "" {
 			continue
 		}
-		if strings.Contains(title, keyword) {
-			titleHits++
+		if strings.Contains(question, keyword) {
+			questionHits++
 			score += 0.045
 			continue
 		}
@@ -1003,13 +1020,13 @@ func rerankRAGMatch(query string, match RAGSearchResult) RAGSearchResult {
 			score += 0.025
 		}
 	}
-	if title != "" && strings.Contains(queryText, title) {
+	if question != "" && strings.Contains(queryText, question) {
 		score += 0.06
 	}
-	if titleHits >= 2 {
+	if questionHits >= 2 {
 		score += 0.04
 	}
-	if titleHits > 0 && contentHits > 0 {
+	if questionHits > 0 && contentHits > 0 {
 		score += 0.025
 	}
 	if match.Source == "hybrid" {
@@ -1023,7 +1040,7 @@ func rerankRAGMatch(query string, match RAGSearchResult) RAGSearchResult {
 }
 
 func hasStrongTextEvidence(match RAGSearchResult) bool {
-	return match.Source == "keyword" || match.Source == "hybrid" || strings.TrimSpace(match.Title) != ""
+	return match.Source == "keyword" || match.Source == "hybrid" || strings.TrimSpace(match.Question) != ""
 }
 
 func normalizeRAGText(value string) string {
@@ -1056,14 +1073,14 @@ func keywordOrderArgs(keyword string) []any {
 }
 
 func keywordScore(record RAGSearchResult, keywords []string) float64 {
-	title := strings.ToLower(record.Title)
+	question := strings.ToLower(record.Question)
 	content := strings.ToLower(record.Content)
 	chunkText := strings.ToLower(record.ChunkText)
 	score := 0.80
 	for _, keyword := range keywords {
 		keyword = strings.ToLower(keyword)
 		switch {
-		case strings.Contains(title, keyword):
+		case strings.Contains(question, keyword):
 			score += 0.08
 		case strings.Contains(chunkText, keyword):
 			score += 0.05
@@ -1083,7 +1100,7 @@ func buildRetrievedPassages(matches []RAGSearchResult) []map[string]any {
 		passages = append(passages, map[string]any{
 			"knowledge_id": match.KnowledgeID,
 			"chunk_id":     match.ChunkID,
-			"title":        match.Title,
+			"question":     match.Question,
 			"score":        match.Score,
 			"source":       match.Source,
 			"text":         ragPassageText(match),
@@ -1099,9 +1116,9 @@ func citationsFromRetrievedDocs(docs []ai.RetrievedDocument) []CitationRecord {
 			continue
 		}
 		citations = append(citations, CitationRecord{
-			DocID: doc.DocID,
-			Title: doc.Title,
-			Score: doc.Score,
+			DocID:    doc.DocID,
+			Question: doc.Question,
+			Score:    doc.Score,
 		})
 	}
 	return citations
@@ -1331,7 +1348,7 @@ func knowledgeRecordFromRequest(id int64, request KnowledgeRequest) KnowledgeRec
 	return KnowledgeRecord{
 		ID:          id,
 		KnowledgeID: request.KnowledgeID,
-		Title:       request.Title,
+		Question:    request.Question,
 		Content:     request.Content,
 		Category:    request.Category,
 		Owner:       request.Owner,
@@ -1344,7 +1361,7 @@ func buildKnowledgeChunks(record KnowledgeRecord) []KnowledgeChunkRecord {
 	const maxChunkRunes = 500
 	const overlapRunes = 80
 
-	text := normalizeKnowledgeText(record.Title, record.Content)
+	text := normalizeKnowledgeText(record.Question, record.Content)
 	runes := []rune(text)
 	if len(runes) == 0 {
 		return []KnowledgeChunkRecord{}
@@ -1378,16 +1395,16 @@ func buildKnowledgeChunks(record KnowledgeRecord) []KnowledgeChunkRecord {
 	return chunks
 }
 
-func normalizeKnowledgeText(title string, content string) string {
-	title = strings.TrimSpace(title)
+func normalizeKnowledgeText(question string, content string) string {
+	question = strings.TrimSpace(question)
 	content = strings.TrimSpace(content)
-	if title == "" {
+	if question == "" {
 		return "内容：" + content
 	}
 	if content == "" {
-		return "标题：" + title
+		return "问题：" + question
 	}
-	return "标题：" + title + "\n内容：" + content
+	return "问题：" + question + "\n内容：" + content
 }
 
 func estimateTokenCount(text string) int {
