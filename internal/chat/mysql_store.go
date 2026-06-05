@@ -66,8 +66,9 @@ func (s *MySQLStore) SaveAIEvent(ctx context.Context, record AIEventRecord) erro
 		ctx,
 		`INSERT INTO cs_ai_event
 		 (trace_id, conversation_id, message_id, intent, route, response_type,
-		  handoff_required, handoff_reason, latency_ms, model_used)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		  handoff_required, handoff_reason, latency_ms, model_used,
+		  input_tokens, output_tokens, estimated_cost)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.TraceID,
 		record.ConversationID,
 		record.MessageID,
@@ -78,6 +79,9 @@ func (s *MySQLStore) SaveAIEvent(ctx context.Context, record AIEventRecord) erro
 		record.HandoffReason,
 		record.LatencyMS,
 		record.ModelUsed,
+		record.InputTokens,
+		record.OutputTokens,
+		record.EstimatedCost,
 	)
 	if err != nil {
 		return fmt.Errorf("save ai event: %w", err)
@@ -105,9 +109,10 @@ func (s *MySQLStore) SaveTraceLog(ctx context.Context, record TraceLogRecord) er
 		`INSERT INTO cs_trace_log
 		 (trace_id, conversation_id, message_id, user_id, channel, message_type,
 		  user_message, response_text, intent, route, response_type, risk_level,
-		  handoff_required, handoff_reason, model_used, total_latency_ms,
+		  handoff_required, handoff_reason, model_used, input_tokens, output_tokens,
+		  estimated_cost, total_latency_ms,
 		  stages, rag_matches, citations, error_message)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON DUPLICATE KEY UPDATE
 		  response_text = VALUES(response_text),
 		  intent = VALUES(intent),
@@ -117,6 +122,9 @@ func (s *MySQLStore) SaveTraceLog(ctx context.Context, record TraceLogRecord) er
 		  handoff_required = VALUES(handoff_required),
 		  handoff_reason = VALUES(handoff_reason),
 		  model_used = VALUES(model_used),
+		  input_tokens = VALUES(input_tokens),
+		  output_tokens = VALUES(output_tokens),
+		  estimated_cost = VALUES(estimated_cost),
 		  total_latency_ms = VALUES(total_latency_ms),
 		  stages = VALUES(stages),
 		  rag_matches = VALUES(rag_matches),
@@ -137,6 +145,9 @@ func (s *MySQLStore) SaveTraceLog(ctx context.Context, record TraceLogRecord) er
 		record.HandoffRequired,
 		record.HandoffReason,
 		record.ModelUsed,
+		record.InputTokens,
+		record.OutputTokens,
+		record.EstimatedCost,
 		record.TotalLatencyMS,
 		string(stagesJSON),
 		string(ragMatchesJSON),
@@ -160,6 +171,7 @@ func (s *MySQLStore) ListTraceLogs(ctx context.Context, limit int) ([]TraceLogRe
 		        COALESCE(user_message, ''), COALESCE(response_text, ''), COALESCE(intent, ''),
 		        COALESCE(route, ''), COALESCE(response_type, ''), COALESCE(risk_level, ''),
 		        handoff_required, COALESCE(handoff_reason, ''), COALESCE(model_used, ''),
+		        COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), COALESCE(estimated_cost, 0),
 		        COALESCE(total_latency_ms, 0), COALESCE(stages, JSON_ARRAY()),
 		        COALESCE(rag_matches, JSON_ARRAY()), COALESCE(citations, JSON_ARRAY()),
 		        COALESCE(error_message, ''),
@@ -197,6 +209,9 @@ func (s *MySQLStore) ListTraceLogs(ctx context.Context, limit int) ([]TraceLogRe
 			&record.HandoffRequired,
 			&record.HandoffReason,
 			&record.ModelUsed,
+			&record.InputTokens,
+			&record.OutputTokens,
+			&record.EstimatedCost,
 			&record.TotalLatencyMS,
 			&stagesRaw,
 			&ragMatchesRaw,
@@ -215,6 +230,68 @@ func (s *MySQLStore) ListTraceLogs(ctx context.Context, limit int) ([]TraceLogRe
 		return nil, fmt.Errorf("iterate trace logs: %w", err)
 	}
 	return records, nil
+}
+
+func (s *MySQLStore) GetQualityStats(ctx context.Context, limit int) (QualityStats, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT COALESCE(stages, JSON_ARRAY())
+		 FROM cs_trace_log
+		 ORDER BY id DESC
+		 LIMIT ?`,
+		limit,
+	)
+	if err != nil {
+		return QualityStats{}, fmt.Errorf("get quality stats: %w", err)
+	}
+	defer rows.Close()
+
+	stats := QualityStats{WindowLimit: limit}
+	for rows.Next() {
+		stats.Total++
+		var stagesRaw string
+		if err := rows.Scan(&stagesRaw); err != nil {
+			return QualityStats{}, fmt.Errorf("scan quality stages: %w", err)
+		}
+		var stages []TraceStageRecord
+		if err := json.Unmarshal([]byte(stagesRaw), &stages); err != nil {
+			continue
+		}
+		for _, stage := range stages {
+			if stage.Name != "response_validator" {
+				continue
+			}
+			stats.ValidatorChecked++
+			if stage.Status != "pass" {
+				stats.ValidatorBlocked++
+			}
+			switch stage.Detail {
+			case "missing_citation", "low_quality_reply", "empty_reply":
+				stats.SuspectedHallucination++
+			case "sensitive_intent_or_promise":
+				stats.UnsafeBlocked++
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return QualityStats{}, fmt.Errorf("iterate quality stats: %w", err)
+	}
+
+	stats.ValidatorBlockRate = ratio(stats.ValidatorBlocked, stats.ValidatorChecked)
+	stats.HallucinationRate = ratio(stats.SuspectedHallucination, stats.ValidatorChecked)
+	stats.UnsafeRate = ratio(stats.UnsafeBlocked, stats.ValidatorChecked)
+	return stats, nil
+}
+
+func ratio(numerator int64, denominator int64) float64 {
+	if denominator <= 0 {
+		return 0
+	}
+	return float64(numerator) / float64(denominator)
 }
 
 func (s *MySQLStore) SaveFeedback(ctx context.Context, record FeedbackRecord) error {
@@ -657,6 +734,9 @@ func (s *MySQLStore) CreateKnowledge(ctx context.Context, record KnowledgeRecord
 		return KnowledgeRecord{}, fmt.Errorf("get knowledge id: %w", err)
 	}
 	record.ID = id
+	if err := s.SaveKnowledgeVersion(ctx, record, "create"); err != nil {
+		return KnowledgeRecord{}, err
+	}
 	return record, nil
 }
 
@@ -690,6 +770,115 @@ func (s *MySQLStore) UpdateKnowledge(ctx context.Context, record KnowledgeRecord
 		if exists == 0 {
 			return KnowledgeRecord{}, fmt.Errorf("knowledge not found")
 		}
+	}
+	if err := s.SaveKnowledgeVersion(ctx, record, "update"); err != nil {
+		return KnowledgeRecord{}, err
+	}
+	return record, nil
+}
+
+func (s *MySQLStore) GetKnowledgeByID(ctx context.Context, id int64) (KnowledgeRecord, error) {
+	var record KnowledgeRecord
+	err := s.db.QueryRowContext(
+		ctx,
+		`SELECT id, knowledge_id, title, content, category, COALESCE(owner, ''), version, status
+		 FROM cs_knowledge
+		 WHERE id = ?`,
+		id,
+	).Scan(
+		&record.ID,
+		&record.KnowledgeID,
+		&record.Title,
+		&record.Content,
+		&record.Category,
+		&record.Owner,
+		&record.Version,
+		&record.Status,
+	)
+	if err != nil {
+		return KnowledgeRecord{}, fmt.Errorf("get knowledge by id: %w", err)
+	}
+	return record, nil
+}
+
+func (s *MySQLStore) ListKnowledgeVersions(ctx context.Context, knowledgeID string) ([]KnowledgeVersionRecord, error) {
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT id, knowledge_id, title, content, category, COALESCE(owner, ''), version, status, change_type,
+		        DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s')
+		 FROM cs_knowledge_version
+		 WHERE knowledge_id = ?
+		 ORDER BY id DESC`,
+		knowledgeID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list knowledge versions: %w", err)
+	}
+	defer rows.Close()
+
+	records := []KnowledgeVersionRecord{}
+	for rows.Next() {
+		var record KnowledgeVersionRecord
+		if err := rows.Scan(
+			&record.ID,
+			&record.KnowledgeID,
+			&record.Title,
+			&record.Content,
+			&record.Category,
+			&record.Owner,
+			&record.Version,
+			&record.Status,
+			&record.ChangeType,
+			&record.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan knowledge version: %w", err)
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate knowledge versions: %w", err)
+	}
+	return records, nil
+}
+
+func (s *MySQLStore) SaveKnowledgeVersion(ctx context.Context, record KnowledgeRecord, changeType string) error {
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO cs_knowledge_version
+		 (knowledge_id, title, content, category, owner, version, status, change_type)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		record.KnowledgeID,
+		record.Title,
+		record.Content,
+		record.Category,
+		record.Owner,
+		record.Version,
+		record.Status,
+		changeType,
+	)
+	if err != nil {
+		return fmt.Errorf("save knowledge version: %w", err)
+	}
+	return nil
+}
+
+func (s *MySQLStore) UpdateKnowledgeStatus(ctx context.Context, id int64, status string) (KnowledgeRecord, error) {
+	record, err := s.GetKnowledgeByID(ctx, id)
+	if err != nil {
+		return KnowledgeRecord{}, err
+	}
+	record.Status = status
+	_, err = s.db.ExecContext(
+		ctx,
+		`UPDATE cs_knowledge SET status = ? WHERE id = ?`,
+		status,
+		id,
+	)
+	if err != nil {
+		return KnowledgeRecord{}, fmt.Errorf("update knowledge status: %w", err)
+	}
+	if err := s.SaveKnowledgeVersion(ctx, record, status); err != nil {
+		return KnowledgeRecord{}, err
 	}
 	return record, nil
 }

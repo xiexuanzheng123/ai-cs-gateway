@@ -6,18 +6,19 @@ Go HTTP gateway for H5 and future native client robot entry.
 
 - Expose the stable chat API.
 - Apply hard handoff rules before AI calls.
-- Call the Python AI service for normal questions.
-- Later: persist sessions and messages to MySQL, cache short context in Redis, and call business tool APIs.
+- Orchestrate rules, short-term memory, RAG, LLM, response validation, and handoff.
+- Persist sessions/messages/trace logs to MySQL and cache memory/RAG results in Redis.
+- Call Python AI service for embedding, vector search, BM25 search, rerank, and LLM reply.
 
 ## Run
 
 推荐从 workspace 根目录按统一顺序启动，见 `../README.md`。
 
-单独启动 gateway 前，至少需要 devops 里的 MySQL 和 Redis 已运行：
+单独启动 gateway 前，需要 devops 里的 MySQL、Redis、Milvus、OpenSearch，以及 Python AI Service 已运行：
 
 ```bash
 cd ../ai-cs-devops
-docker compose up -d mysql redis
+docker compose up -d mysql redis milvus opensearch
 ```
 
 再启动 gateway（会读取项目根目录 `.env`）：
@@ -84,6 +85,30 @@ curl http://localhost:8080/api/customer-service/admin/rules
 ```bash
 curl http://localhost:8080/api/customer-service/admin/dashboard
 curl http://localhost:8080/api/customer-service/admin/flags
+curl http://localhost:8080/api/customer-service/admin/trace-logs
+curl http://localhost:8080/api/customer-service/admin/quality-stats
+```
+
+## RAG Flow
+
+1. Strong rules and handoff rules run first.
+2. Redis short-term memory is read.
+3. Gateway calls AI Service for OpenSearch BM25 recall and Milvus vector recall.
+4. Gateway merges candidates and calls AI Service `/rerank`.
+5. Gateway calls AI Service `/v1/ai/reply` with retrieved passages.
+6. Response validator checks citation, low-quality reply, and unsafe promise.
+7. Trace log records branch, retrieved knowledge, validator result, model, token usage, cost estimate, and latency.
+
+## Knowledge Operations
+
+Admin APIs support direct edit plus version operations:
+
+```bash
+curl http://localhost:8080/api/customer-service/admin/knowledge
+curl http://localhost:8080/api/customer-service/admin/knowledge/{id}/versions
+curl -X POST http://localhost:8080/api/customer-service/admin/knowledge/{id}/publish
+curl -X POST http://localhost:8080/api/customer-service/admin/knowledge/{id}/versions/{version_id}/rollback
+curl -X POST http://localhost:8080/api/customer-service/admin/knowledge/chunks/sync
 ```
 
 ## P0 Regression

@@ -34,6 +34,9 @@ type AIEventRecord struct {
 	HandoffReason   string
 	LatencyMS       int
 	ModelUsed       string
+	InputTokens     int
+	OutputTokens    int
+	EstimatedCost   float64
 }
 
 type TraceStageRecord struct {
@@ -60,6 +63,9 @@ type TraceLogRecord struct {
 	HandoffRequired bool               `json:"handoff_required"`
 	HandoffReason   string             `json:"handoff_reason"`
 	ModelUsed       string             `json:"model_used"`
+	InputTokens     int                `json:"input_tokens"`
+	OutputTokens    int                `json:"output_tokens"`
+	EstimatedCost   float64            `json:"estimated_cost"`
 	TotalLatencyMS  int                `json:"total_latency_ms"`
 	Stages          []TraceStageRecord `json:"stages"`
 	RAGMatches      []RAGSearchResult  `json:"rag_matches"`
@@ -115,6 +121,18 @@ type DashboardStats struct {
 	AverageLatencyMS   float64 `json:"average_latency_ms"`
 }
 
+type QualityStats struct {
+	Total                  int64   `json:"total"`
+	ValidatorChecked       int64   `json:"validator_checked"`
+	ValidatorBlocked       int64   `json:"validator_blocked"`
+	SuspectedHallucination int64   `json:"suspected_hallucination"`
+	UnsafeBlocked          int64   `json:"unsafe_blocked"`
+	ValidatorBlockRate     float64 `json:"validator_block_rate"`
+	HallucinationRate      float64 `json:"hallucination_rate"`
+	UnsafeRate             float64 `json:"unsafe_rate"`
+	WindowLimit            int     `json:"window_limit"`
+}
+
 type KnowledgeRecord struct {
 	ID          int64  `json:"id"`
 	KnowledgeID string `json:"knowledge_id"`
@@ -124,6 +142,19 @@ type KnowledgeRecord struct {
 	Owner       string `json:"owner"`
 	Version     string `json:"version"`
 	Status      string `json:"status"`
+}
+
+type KnowledgeVersionRecord struct {
+	ID          int64  `json:"id"`
+	KnowledgeID string `json:"knowledge_id"`
+	Title       string `json:"title"`
+	Content     string `json:"content"`
+	Category    string `json:"category"`
+	Owner       string `json:"owner"`
+	Version     string `json:"version"`
+	Status      string `json:"status"`
+	ChangeType  string `json:"change_type"`
+	CreatedAt   string `json:"created_at"`
 }
 
 type CategoryRecord struct {
@@ -206,6 +237,7 @@ type Store interface {
 	SaveAIEvent(ctx context.Context, record AIEventRecord) error
 	SaveTraceLog(ctx context.Context, record TraceLogRecord) error
 	ListTraceLogs(ctx context.Context, limit int) ([]TraceLogRecord, error)
+	GetQualityStats(ctx context.Context, limit int) (QualityStats, error)
 	SaveFeedback(ctx context.Context, record FeedbackRecord) error
 	SaveHandoff(ctx context.Context, record HandoffRecord) error
 	ListRules(ctx context.Context) ([]RuleConfigRecord, error)
@@ -223,6 +255,10 @@ type Store interface {
 	ListKnowledge(ctx context.Context) ([]KnowledgeRecord, error)
 	CreateKnowledge(ctx context.Context, record KnowledgeRecord) (KnowledgeRecord, error)
 	UpdateKnowledge(ctx context.Context, record KnowledgeRecord) (KnowledgeRecord, error)
+	GetKnowledgeByID(ctx context.Context, id int64) (KnowledgeRecord, error)
+	ListKnowledgeVersions(ctx context.Context, knowledgeID string) ([]KnowledgeVersionRecord, error)
+	SaveKnowledgeVersion(ctx context.Context, record KnowledgeRecord, changeType string) error
+	UpdateKnowledgeStatus(ctx context.Context, id int64, status string) (KnowledgeRecord, error)
 	ReplaceKnowledgeChunks(ctx context.Context, records []KnowledgeChunkRecord) error
 	ReplaceKnowledgeChunksByKnowledgeID(ctx context.Context, knowledgeID string, records []KnowledgeChunkRecord) error
 	ListKnowledgeChunksWithoutVector(ctx context.Context) ([]KnowledgeChunkRecord, error)
@@ -256,6 +292,10 @@ func (NoopStore) SaveTraceLog(ctx context.Context, record TraceLogRecord) error 
 
 func (NoopStore) ListTraceLogs(ctx context.Context, limit int) ([]TraceLogRecord, error) {
 	return []TraceLogRecord{}, nil
+}
+
+func (NoopStore) GetQualityStats(ctx context.Context, limit int) (QualityStats, error) {
+	return QualityStats{WindowLimit: limit}, nil
 }
 
 func (NoopStore) SaveFeedback(ctx context.Context, record FeedbackRecord) error {
@@ -327,6 +367,22 @@ func (NoopStore) CreateKnowledge(ctx context.Context, record KnowledgeRecord) (K
 
 func (NoopStore) UpdateKnowledge(ctx context.Context, record KnowledgeRecord) (KnowledgeRecord, error) {
 	return record, nil
+}
+
+func (NoopStore) GetKnowledgeByID(ctx context.Context, id int64) (KnowledgeRecord, error) {
+	return KnowledgeRecord{ID: id}, nil
+}
+
+func (NoopStore) ListKnowledgeVersions(ctx context.Context, knowledgeID string) ([]KnowledgeVersionRecord, error) {
+	return []KnowledgeVersionRecord{}, nil
+}
+
+func (NoopStore) SaveKnowledgeVersion(ctx context.Context, record KnowledgeRecord, changeType string) error {
+	return nil
+}
+
+func (NoopStore) UpdateKnowledgeStatus(ctx context.Context, id int64, status string) (KnowledgeRecord, error) {
+	return KnowledgeRecord{ID: id, Status: status}, nil
 }
 
 func (NoopStore) ReplaceKnowledgeChunks(ctx context.Context, records []KnowledgeChunkRecord) error {

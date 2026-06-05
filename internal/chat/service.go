@@ -129,6 +129,9 @@ type AIClient interface {
 	Reply(ctx context.Context, request ai.ReplyRequest) (ai.ReplyResponse, error)
 	UpsertVectors(ctx context.Context, request ai.VectorUpsertRequest) (ai.VectorUpsertResponse, error)
 	SearchVectors(ctx context.Context, request ai.VectorSearchRequest) (ai.VectorSearchResponse, error)
+	UpsertKeywords(ctx context.Context, request ai.KeywordUpsertRequest) (ai.KeywordUpsertResponse, error)
+	SearchKeywords(ctx context.Context, request ai.KeywordSearchRequest) (ai.KeywordSearchResponse, error)
+	Rerank(ctx context.Context, request ai.RerankRequest) (ai.RerankResponse, error)
 }
 
 type traceRecorder struct {
@@ -359,12 +362,18 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 		HandoffRequired: response.Handoff.Required,
 		HandoffReason:   response.Handoff.Reason,
 		LatencyMS:       elapsedMilliseconds(startedAt),
-		ModelUsed:       "ai-service",
+		ModelUsed:       firstNonEmpty(aiResponse.Model, "ai-service"),
+		InputTokens:     aiResponse.InputTokens,
+		OutputTokens:    aiResponse.OutputTokens,
+		EstimatedCost:   aiResponse.EstimatedCost,
 	}); err != nil {
 		s.saveTraceError(ctx, trace, err)
 		return SendMessageResponse{}, err
 	}
-	trace.finish(response, "ai-service", elapsedMilliseconds(startedAt))
+	trace.record.InputTokens = aiResponse.InputTokens
+	trace.record.OutputTokens = aiResponse.OutputTokens
+	trace.record.EstimatedCost = aiResponse.EstimatedCost
+	trace.finish(response, firstNonEmpty(aiResponse.Model, "ai-service"), elapsedMilliseconds(startedAt))
 	s.saveSessionMemory(ctx, memory, request, response, trace)
 	s.emitTrace(trace)
 	return response, nil
@@ -448,6 +457,10 @@ func (s *Service) ListTraceLogs(ctx context.Context, limit int) ([]TraceLogRecor
 	return s.store.ListTraceLogs(ctx, limit)
 }
 
+func (s *Service) GetQualityStats(ctx context.Context, limit int) (QualityStats, error) {
+	return s.store.GetQualityStats(ctx, limit)
+}
+
 func (s *Service) ListFeatureFlags(ctx context.Context) ([]FeatureFlagRecord, error) {
 	return s.store.ListFeatureFlags(ctx)
 }
@@ -514,6 +527,61 @@ func (s *Service) UpdateKnowledge(ctx context.Context, id int64, request Knowled
 	}
 	s.clearRAGCache(ctx)
 	return record, nil
+}
+
+func (s *Service) ListKnowledgeVersions(ctx context.Context, id int64) ([]KnowledgeVersionRecord, error) {
+	record, err := s.store.GetKnowledgeByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.ListKnowledgeVersions(ctx, record.KnowledgeID)
+}
+
+func (s *Service) PublishKnowledge(ctx context.Context, id int64) (KnowledgeRecord, error) {
+	record, err := s.store.UpdateKnowledgeStatus(ctx, id, "published")
+	if err != nil {
+		return KnowledgeRecord{}, err
+	}
+	if err := s.rebuildKnowledgeChunks(ctx, record); err != nil {
+		return KnowledgeRecord{}, err
+	}
+	s.clearRAGCache(ctx)
+	return record, nil
+}
+
+func (s *Service) RollbackKnowledge(ctx context.Context, id int64, versionID int64) (KnowledgeRecord, error) {
+	current, err := s.store.GetKnowledgeByID(ctx, id)
+	if err != nil {
+		return KnowledgeRecord{}, err
+	}
+	versions, err := s.store.ListKnowledgeVersions(ctx, current.KnowledgeID)
+	if err != nil {
+		return KnowledgeRecord{}, err
+	}
+	for _, version := range versions {
+		if version.ID != versionID {
+			continue
+		}
+		record, err := s.store.UpdateKnowledge(ctx, KnowledgeRecord{
+			ID:          id,
+			KnowledgeID: version.KnowledgeID,
+			Title:       version.Title,
+			Content:     version.Content,
+			Category:    version.Category,
+			Owner:       version.Owner,
+			Version:     version.Version,
+			Status:      version.Status,
+		})
+		if err != nil {
+			return KnowledgeRecord{}, err
+		}
+		if err := s.rebuildKnowledgeChunks(ctx, record); err != nil {
+			return KnowledgeRecord{}, err
+		}
+		s.clearRAGCache(ctx)
+		return record, nil
+	}
+	return KnowledgeRecord{}, fmt.Errorf("knowledge version not found")
 }
 
 func (s *Service) SyncKnowledgeChunks(ctx context.Context) (KnowledgeChunkSyncResult, error) {
@@ -590,6 +658,11 @@ func (s *Service) upsertKnowledgeChunks(ctx context.Context, chunks []KnowledgeC
 	if err := s.store.UpdateKnowledgeChunkVectorIDs(ctx, vectorIDs); err != nil {
 		return 0, "", err
 	}
+
+	// 同一批 chunk 同步写入 OpenSearch，后续 RAG 可走 BM25 + 向量混合召回。
+	if _, err := s.aiClient.UpsertKeywords(ctx, ai.KeywordUpsertRequest{Chunks: vectorChunks}); err != nil {
+		return 0, "", err
+	}
 	return len(response.Items), response.Model, nil
 }
 
@@ -614,7 +687,7 @@ func (s *Service) searchRAG(ctx context.Context, query string, topK int) (RAGSea
 		}
 	}
 
-	keywordMatches, err := s.store.SearchKnowledgeByKeyword(ctx, query, topK)
+	keywordMatches, err := s.searchKeywordKnowledge(ctx, query, topK)
 	if err != nil {
 		return RAGSearchResult{}, nil, false, cacheStatus, err
 	}
@@ -658,12 +731,143 @@ func (s *Service) searchRAG(ctx context.Context, query string, topK int) (RAGSea
 		matches = append(matches, result)
 	}
 	matches = mergeRAGMatches(query, matches, keywordMatches, topK)
+	matches = s.rerankRAGMatches(ctx, query, matches, topK)
 	matched := ragHasUsableKnowledge(matches)
 	s.setRAGCache(ctx, query, topK, matches)
 	if !matched {
 		return RAGSearchResult{}, matches, false, cacheStatus, nil
 	}
 	return matches[0], matches, true, cacheStatus, nil
+}
+
+func (s *Service) rerankRAGMatches(ctx context.Context, query string, matches []RAGSearchResult, topK int) []RAGSearchResult {
+	if len(matches) <= 1 {
+		return matches
+	}
+	if topK <= 0 {
+		topK = 3
+	}
+
+	limit := len(matches)
+	if limit > 5 {
+		limit = 5
+	}
+	documents := make([]ai.RerankDocument, 0, limit)
+	byID := make(map[string]RAGSearchResult, limit)
+	for _, match := range matches[:limit] {
+		id := firstNonEmpty(match.ChunkID, match.KnowledgeID)
+		text := strings.TrimSpace(firstNonEmpty(firstNonEmpty(match.ChunkText, match.Content), match.Title))
+		if id == "" || text == "" {
+			continue
+		}
+		documents = append(documents, ai.RerankDocument{ID: id, Text: text})
+		byID[id] = match
+	}
+	if len(documents) <= 1 {
+		return matches
+	}
+
+	response, err := s.aiClient.Rerank(ctx, ai.RerankRequest{
+		Query:     query,
+		Documents: documents,
+		TopN:      topK,
+	})
+	if err != nil || len(response.Items) == 0 {
+		return matches
+	}
+
+	reranked := make([]RAGSearchResult, 0, len(matches))
+	used := make(map[string]bool, len(response.Items))
+	for _, item := range response.Items {
+		match, ok := byID[item.ID]
+		if !ok {
+			continue
+		}
+		match.Score = normalizeRerankScore(item.Score, match.Score)
+		if match.Source == "" {
+			match.Source = "rerank"
+		} else if !strings.Contains(match.Source, "rerank") {
+			match.Source += "_rerank"
+		}
+		reranked = append(reranked, match)
+		used[item.ID] = true
+	}
+	for _, match := range matches {
+		id := firstNonEmpty(match.ChunkID, match.KnowledgeID)
+		if used[id] {
+			continue
+		}
+		reranked = append(reranked, match)
+	}
+	if len(reranked) > topK {
+		return reranked[:topK]
+	}
+	return reranked
+}
+
+func normalizeRerankScore(rerankScore float64, fallback float64) float64 {
+	if rerankScore <= 0 {
+		return fallback
+	}
+	if rerankScore <= 1 {
+		return 0.74 + rerankScore*0.23
+	}
+	normalized := 0.74 + rerankScore/(rerankScore+8)*0.23
+	if normalized > 0.97 {
+		return 0.97
+	}
+	return normalized
+}
+
+func (s *Service) searchKeywordKnowledge(ctx context.Context, query string, topK int) ([]RAGSearchResult, error) {
+	response, err := s.aiClient.SearchKeywords(ctx, ai.KeywordSearchRequest{Query: query, TopK: topK})
+	if err != nil {
+		// OpenSearch 是主关键词召回，但不可用时不能阻断客服主流程。
+		return s.store.SearchKnowledgeByKeyword(ctx, query, topK)
+	}
+	if len(response.Items) == 0 {
+		return []RAGSearchResult{}, nil
+	}
+
+	chunkIDs := make([]string, 0, len(response.Items))
+	scores := map[string]float64{}
+	chunkText := map[string]string{}
+	for _, item := range response.Items {
+		chunkIDs = append(chunkIDs, item.ChunkID)
+		scores[item.ChunkID] = normalizeOpenSearchScore(item.Score)
+		chunkText[item.ChunkID] = item.ChunkText
+	}
+	records, err := s.store.GetKnowledgeByChunkIDs(ctx, chunkIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	matches := make([]RAGSearchResult, 0, len(response.Items))
+	for _, item := range response.Items {
+		result, ok := records[item.ChunkID]
+		if !ok {
+			result = RAGSearchResult{
+				ChunkID:     item.ChunkID,
+				KnowledgeID: item.KnowledgeID,
+			}
+		}
+		result.Score = scores[item.ChunkID]
+		result.ChunkText = firstNonEmpty(chunkText[item.ChunkID], result.ChunkText)
+		result.Source = "keyword"
+		matches = append(matches, result)
+	}
+	return matches, nil
+}
+
+func normalizeOpenSearchScore(score float64) float64 {
+	if score <= 0 {
+		return 0
+	}
+	normalized := 0.70 + score/(score+8)*0.25
+	if normalized > 0.95 {
+		return 0.95
+	}
+	return normalized
 }
 
 func (s *Service) setRAGCache(ctx context.Context, query string, topK int, matches []RAGSearchResult) {

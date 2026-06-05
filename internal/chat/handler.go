@@ -143,6 +143,17 @@ func (h *Handler) ListTraceLogs(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"logs": records})
 }
 
+func (h *Handler) QualityStats(c *gin.Context) {
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "200"))
+	stats, err := h.service.GetQualityStats(c.Request.Context(), limit)
+	if err != nil {
+		writeUpstreamError(c, "quality_stats_failed", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, stats)
+}
+
 func (h *Handler) ListFeatureFlags(c *gin.Context) {
 	flags, err := h.service.ListFeatureFlags(c.Request.Context())
 	if err != nil {
@@ -276,6 +287,56 @@ func (h *Handler) UpdateKnowledge(c *gin.Context) {
 	record, err := h.service.UpdateKnowledge(c.Request.Context(), id, request)
 	if err != nil {
 		writeUpstreamError(c, "update_knowledge_failed", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, record)
+}
+
+func (h *Handler) ListKnowledgeVersions(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeBadRequest(c, "invalid_knowledge_id", nil)
+		return
+	}
+	records, err := h.service.ListKnowledgeVersions(c.Request.Context(), id)
+	if err != nil {
+		writeUpstreamError(c, "list_knowledge_versions_failed", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"versions": records})
+}
+
+func (h *Handler) PublishKnowledge(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeBadRequest(c, "invalid_knowledge_id", nil)
+		return
+	}
+	record, err := h.service.PublishKnowledge(c.Request.Context(), id)
+	if err != nil {
+		writeUpstreamError(c, "publish_knowledge_failed", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, record)
+}
+
+func (h *Handler) RollbackKnowledge(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeBadRequest(c, "invalid_knowledge_id", nil)
+		return
+	}
+	versionID, err := strconv.ParseInt(c.Param("version_id"), 10, 64)
+	if err != nil || versionID <= 0 {
+		writeBadRequest(c, "invalid_version_id", nil)
+		return
+	}
+	record, err := h.service.RollbackKnowledge(c.Request.Context(), id, versionID)
+	if err != nil {
+		writeUpstreamError(c, "rollback_knowledge_failed", err)
 		return
 	}
 

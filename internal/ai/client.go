@@ -36,6 +36,10 @@ type ReplyResponse struct {
 	TransferToHuman bool                `json:"transfer_to_human"`
 	RetrievedDocs   []RetrievedDocument `json:"retrieved_docs"`
 	Suggestions     []string            `json:"suggestions"`
+	Model           string              `json:"model"`
+	InputTokens     int                 `json:"input_tokens"`
+	OutputTokens    int                 `json:"output_tokens"`
+	EstimatedCost   float64             `json:"estimated_cost"`
 }
 
 type RetrievedDocument struct {
@@ -83,6 +87,59 @@ type VectorSearchResponse struct {
 	Model     string             `json:"model"`
 }
 
+type KeywordUpsertRequest struct {
+	Chunks []VectorChunk `json:"chunks"`
+}
+
+type KeywordUpsertItem struct {
+	ChunkID   string `json:"chunk_id"`
+	KeywordID string `json:"keyword_id"`
+}
+
+type KeywordUpsertResponse struct {
+	Items []KeywordUpsertItem `json:"items"`
+	Index string              `json:"index"`
+}
+
+type KeywordSearchRequest struct {
+	Query string `json:"query"`
+	TopK  int    `json:"top_k"`
+}
+
+type KeywordSearchItem struct {
+	ChunkID     string  `json:"chunk_id"`
+	KnowledgeID string  `json:"knowledge_id"`
+	Score       float64 `json:"score"`
+	ChunkText   string  `json:"chunk_text"`
+}
+
+type KeywordSearchResponse struct {
+	Items []KeywordSearchItem `json:"items"`
+	Index string              `json:"index"`
+}
+
+type RerankDocument struct {
+	ID   string `json:"id"`
+	Text string `json:"text"`
+}
+
+type RerankRequest struct {
+	Query     string           `json:"query"`
+	Documents []RerankDocument `json:"documents"`
+	TopN      int              `json:"top_n"`
+}
+
+type RerankItem struct {
+	ID    string  `json:"id"`
+	Index int     `json:"index"`
+	Score float64 `json:"score"`
+}
+
+type RerankResponse struct {
+	Items []RerankItem `json:"items"`
+	Model string       `json:"model"`
+}
+
 func NewClient(baseURL string, timeout time.Duration) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
@@ -115,6 +172,32 @@ func (c *Client) SearchVectors(ctx context.Context, request VectorSearchRequest)
 	// RAG 检索第一段：Python 返回 chunk_id 和分数，Go 再回查 MySQL 取完整知识内容。
 	if err := c.post(ctx, "/vector/search", request, &response); err != nil {
 		return VectorSearchResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) UpsertKeywords(ctx context.Context, request KeywordUpsertRequest) (KeywordUpsertResponse, error) {
+	var response KeywordUpsertResponse
+	// 关键词索引写入 OpenSearch，用于 BM25 召回。
+	if err := c.post(ctx, "/keyword/chunks/upsert", request, &response); err != nil {
+		return KeywordUpsertResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) SearchKeywords(ctx context.Context, request KeywordSearchRequest) (KeywordSearchResponse, error) {
+	var response KeywordSearchResponse
+	// 关键词召回由 OpenSearch 承接，MySQL LIKE 只作为降级方案。
+	if err := c.post(ctx, "/keyword/search", request, &response); err != nil {
+		return KeywordSearchResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) Rerank(ctx context.Context, request RerankRequest) (RerankResponse, error) {
+	var response RerankResponse
+	if err := c.post(ctx, "/rerank", request, &response); err != nil {
+		return RerankResponse{}, err
 	}
 	return response, nil
 }
