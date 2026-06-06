@@ -105,6 +105,7 @@ func NewServer(cfg config.Config) *gin.Engine {
 	router.POST("/api/customer-service/admin/knowledge/chunks/sync", chatHandler.SyncKnowledgeChunks)
 	router.GET("/api/customer-service/admin/rag-eval-cases", chatHandler.ListRAGEvalCases)
 	router.GET("/api/customer-service/admin/rag-eval-runs", chatHandler.ListRAGEvalRuns)
+	router.POST("/api/customer-service/admin/rag-eval-cases/seed", chatHandler.SeedRAGEvalCases)
 	router.POST("/api/customer-service/admin/rag-eval-cases/run", chatHandler.RunRAGEvalCases)
 	router.POST("/api/customer-service/admin/rag-eval-cases", chatHandler.CreateRAGEvalCase)
 	router.PUT("/api/customer-service/admin/rag-eval-cases/:id", chatHandler.UpdateRAGEvalCase)

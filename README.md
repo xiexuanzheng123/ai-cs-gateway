@@ -118,3 +118,28 @@ Gateway 启动后执行：
 ```bash
 bash scripts/p0_regression.sh
 ```
+
+## RAG Regression
+
+不依赖测试同学，可从本地 `cs_knowledge` 自动抽取 200 条 `published` 知识生成回归 case：
+
+- `query_text` = 知识 `question`
+- `expected_knowledge_id` = `knowledge_id`
+- `should_answer` = `true`
+
+同时会补齐少量负例（如「火星演唱会门票怎么领取」），验证无知识问题不强答。
+H5 管理页「RAG 回归集」提供「一键回归」按钮；命令行可用：
+
+```bash
+bash scripts/rag_regression.sh
+```
+
+分步调用：
+
+```bash
+curl -X POST "http://localhost:8080/api/customer-service/admin/rag-eval-cases/seed?target_total=200"
+curl -X POST http://localhost:8080/api/customer-service/admin/rag-eval-cases/run
+curl http://localhost:8080/api/customer-service/admin/rag-eval-runs
+```
+
+运行结果会返回 Top1 / Top3 命中率、疑似幻觉数和 major / unsafe 近似指标。

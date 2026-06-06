@@ -409,6 +409,17 @@ func (h *Handler) ListRAGEvalRuns(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"runs": records})
 }
 
+func (h *Handler) SeedRAGEvalCases(c *gin.Context) {
+	targetTotal, _ := strconv.Atoi(c.DefaultQuery("target_total", "200"))
+	result, err := h.service.SeedRAGEvalCases(c.Request.Context(), targetTotal)
+	if err != nil {
+		writeUpstreamError(c, "seed_rag_eval_cases_failed", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
 func (h *Handler) CreateRAGEvalCase(c *gin.Context) {
 	var request RAGEvalCaseRequest
 	if err := c.ShouldBindJSON(&request); err != nil {

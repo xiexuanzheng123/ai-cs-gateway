@@ -8,12 +8,13 @@ import (
 )
 
 type RAGEvalRunResult struct {
-	Total      int                    `json:"total"`
-	Passed     int                    `json:"passed"`
-	Failed     int                    `json:"failed"`
-	PassRate   float64                `json:"pass_rate"`
-	DurationMS int                    `json:"duration_ms"`
-	Items      []RAGEvalRunItemResult `json:"items"`
+	Total          int                    `json:"total"`
+	Passed         int                    `json:"passed"`
+	Failed         int                    `json:"failed"`
+	PassRate       float64                `json:"pass_rate"`
+	DurationMS     int                    `json:"duration_ms"`
+	QualitySummary RAGEvalQualitySummary  `json:"quality_summary"`
+	Items          []RAGEvalRunItemResult `json:"items"`
 }
 
 type RAGEvalRunItemResult struct {
@@ -28,6 +29,59 @@ type RAGEvalRunItemResult struct {
 	Top1Score           float64           `json:"top1_score"`
 	Matches             []RAGSearchResult `json:"matches"`
 	DurationMS          int               `json:"duration_ms"`
+}
+
+type RAGEvalQualitySummary struct {
+	Top1HitRate             float64 `json:"top1_hit_rate"`
+	Top3HitRate             float64 `json:"top3_hit_rate"`
+	ShouldAnswerMissCount   int     `json:"should_answer_miss_count"`
+	ShouldNotAnswerHitCount int     `json:"should_not_answer_hit_count"`
+	MissingCitationCount    int     `json:"missing_citation_count"`
+	SuspectedHallucination  int     `json:"suspected_hallucination"`
+	MajorUnsafeCount        int     `json:"major_unsafe_count"`
+	MajorUnsafeRate         float64 `json:"major_unsafe_rate"`
+	AverageCaseLatencyMS    int     `json:"average_case_latency_ms"`
+}
+
+type RAGEvalSeedResult struct {
+	TargetTotal     int `json:"target_total"`
+	BeforeTotal     int `json:"before_total"`
+	Created         int `json:"created"`
+	NegativeCreated int `json:"negative_created"`
+	AfterTotal      int `json:"after_total"`
+}
+
+var defaultRAGEvalNegativeCases = []RAGEvalCaseRecord{
+	{
+		CaseID:       "neg_mars_concert_ticket",
+		QueryText:    "火星演唱会门票怎么领取",
+		ShouldAnswer: false,
+		Status:       "active",
+	},
+	{
+		CaseID:       "neg_weather_query",
+		QueryText:    "今天北京天气怎么样",
+		ShouldAnswer: false,
+		Status:       "active",
+	},
+	{
+		CaseID:       "neg_flight_booking",
+		QueryText:    "帮我订一张明天飞纽约的机票",
+		ShouldAnswer: false,
+		Status:       "active",
+	},
+	{
+		CaseID:       "neg_stock_price",
+		QueryText:    "特斯拉股价现在是多少",
+		ShouldAnswer: false,
+		Status:       "active",
+	},
+	{
+		CaseID:       "neg_game_rank",
+		QueryText:    "王者荣耀怎么快速上王者",
+		ShouldAnswer: false,
+		Status:       "active",
+	},
 }
 
 func (s *Service) RunRAGEvalCases(ctx context.Context) (RAGEvalRunResult, error) {
@@ -59,12 +113,89 @@ func (s *Service) RunRAGEvalCases(ctx context.Context) (RAGEvalRunResult, error)
 	if result.Total > 0 {
 		result.PassRate = float64(result.Passed) / float64(result.Total)
 	}
+	result.QualitySummary = summarizeRAGEvalQuality(result.Items)
 	result.DurationMS = elapsedMilliseconds(startedAt)
 	saved, err := s.store.SaveRAGEvalRun(ctx, ragEvalRunRecordFromResult(newID("rag-eval"), result))
 	if err != nil {
 		return RAGEvalRunResult{}, err
 	}
 	return ragEvalRunResultFromRecord(saved), nil
+}
+
+func (s *Service) SeedRAGEvalCases(ctx context.Context, targetTotal int) (RAGEvalSeedResult, error) {
+	if targetTotal <= 0 {
+		targetTotal = 200
+	}
+	if targetTotal > 500 {
+		targetTotal = 500
+	}
+
+	existingCases, err := s.store.ListRAGEvalCases(ctx)
+	if err != nil {
+		return RAGEvalSeedResult{}, err
+	}
+	result := RAGEvalSeedResult{
+		TargetTotal: targetTotal,
+		BeforeTotal: len(existingCases),
+		AfterTotal:  len(existingCases),
+	}
+
+	existingCaseIDs := map[string]struct{}{}
+	autoPositiveCount := 0
+	for _, item := range existingCases {
+		existingCaseIDs[item.CaseID] = struct{}{}
+		if strings.HasPrefix(item.CaseID, "auto_") {
+			autoPositiveCount++
+		}
+	}
+
+	if autoPositiveCount < targetTotal {
+		knowledge, err := s.store.ListKnowledge(ctx)
+		if err != nil {
+			return RAGEvalSeedResult{}, err
+		}
+		for _, record := range knowledge {
+			if autoPositiveCount >= targetTotal {
+				break
+			}
+			if record.Status != "published" || strings.TrimSpace(record.Question) == "" {
+				continue
+			}
+			caseID := "auto_" + record.KnowledgeID
+			if _, exists := existingCaseIDs[caseID]; exists {
+				continue
+			}
+			_, err := s.store.CreateRAGEvalCase(ctx, RAGEvalCaseRecord{
+				CaseID:              caseID,
+				QueryText:           record.Question,
+				ExpectedKnowledgeID: record.KnowledgeID,
+				ExpectedIntent:      record.Category,
+				ShouldAnswer:        true,
+				Status:              "active",
+			})
+			if err != nil {
+				return RAGEvalSeedResult{}, err
+			}
+			existingCaseIDs[caseID] = struct{}{}
+			autoPositiveCount++
+			result.Created++
+			result.AfterTotal++
+		}
+	}
+
+	for _, negativeCase := range defaultRAGEvalNegativeCases {
+		if _, exists := existingCaseIDs[negativeCase.CaseID]; exists {
+			continue
+		}
+		_, err := s.store.CreateRAGEvalCase(ctx, negativeCase)
+		if err != nil {
+			return RAGEvalSeedResult{}, err
+		}
+		existingCaseIDs[negativeCase.CaseID] = struct{}{}
+		result.NegativeCreated++
+		result.AfterTotal++
+	}
+	return result, nil
 }
 
 func (s *Service) runRAGEvalCase(ctx context.Context, record RAGEvalCaseRecord) (RAGEvalRunItemResult, error) {
@@ -118,6 +249,58 @@ func evaluateRAGCase(record RAGEvalCaseRecord, matched bool, matches []RAGSearch
 	return false, fmt.Sprintf("未命中期望知识，Top1=%s", matches[0].KnowledgeID)
 }
 
+func summarizeRAGEvalQuality(items []RAGEvalRunItemResult) RAGEvalQualitySummary {
+	summary := RAGEvalQualitySummary{}
+	if len(items) == 0 {
+		return summary
+	}
+	expectedCases := 0
+	top1Hits := 0
+	top3Hits := 0
+	totalDuration := 0
+	for _, item := range items {
+		totalDuration += item.DurationMS
+		if item.ShouldAnswer && !item.Matched {
+			summary.ShouldAnswerMissCount++
+			summary.MajorUnsafeCount++
+		}
+		if !item.ShouldAnswer && item.Matched {
+			summary.ShouldNotAnswerHitCount++
+			summary.SuspectedHallucination++
+			summary.MajorUnsafeCount++
+		}
+		if item.ShouldAnswer && item.Matched && len(item.Matches) == 0 {
+			summary.MissingCitationCount++
+			summary.SuspectedHallucination++
+			summary.MajorUnsafeCount++
+		}
+
+		expectedKnowledgeID := strings.TrimSpace(item.ExpectedKnowledgeID)
+		if expectedKnowledgeID == "" {
+			continue
+		}
+		expectedCases++
+		if item.Top1KnowledgeID == expectedKnowledgeID {
+			top1Hits++
+			top3Hits++
+			continue
+		}
+		for _, match := range item.Matches {
+			if match.KnowledgeID == expectedKnowledgeID {
+				top3Hits++
+				break
+			}
+		}
+	}
+	if expectedCases > 0 {
+		summary.Top1HitRate = float64(top1Hits) / float64(expectedCases)
+		summary.Top3HitRate = float64(top3Hits) / float64(expectedCases)
+	}
+	summary.MajorUnsafeRate = float64(summary.MajorUnsafeCount) / float64(len(items))
+	summary.AverageCaseLatencyMS = totalDuration / len(items)
+	return summary
+}
+
 func ragEvalRunRecordFromResult(runID string, result RAGEvalRunResult) RAGEvalRunRecord {
 	items := make([]RAGEvalRunItemRecord, 0, len(result.Items))
 	for _, item := range result.Items {
@@ -165,11 +348,12 @@ func ragEvalRunResultFromRecord(record RAGEvalRunRecord) RAGEvalRunResult {
 		})
 	}
 	return RAGEvalRunResult{
-		Total:      record.Total,
-		Passed:     record.Passed,
-		Failed:     record.Failed,
-		PassRate:   record.PassRate,
-		DurationMS: record.DurationMS,
-		Items:      items,
+		Total:          record.Total,
+		Passed:         record.Passed,
+		Failed:         record.Failed,
+		PassRate:       record.PassRate,
+		DurationMS:     record.DurationMS,
+		QualitySummary: summarizeRAGEvalQuality(items),
+		Items:          items,
 	}
 }
