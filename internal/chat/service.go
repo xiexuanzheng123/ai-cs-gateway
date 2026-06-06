@@ -297,6 +297,11 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 		stageStarted,
 		withCacheStatus(fmt.Sprintf("召回 %d 条，可用 %d 条，Top %.3f", len(ragMatches), len(usableMatches), usableMatches[0].Score), cacheStatus),
 	)
+	if shouldDirectReplyRAG(request.Message, usableMatches) {
+		trace.record.Citations = citationsFromRAGMatches(usableMatches[:1])
+		trace.stage("rag_direct", "hit", time.Now(), fmt.Sprintf("Top %.3f，跳过 LLM", usableMatches[0].Score))
+		return s.saveRAGDirectResponse(ctx, startedAt, traceID, request, usableMatches[0], memory, trace)
+	}
 
 	stageStarted = time.Now()
 	aiResponse, err := s.aiClient.Reply(ctx, ai.ReplyRequest{
@@ -374,6 +379,51 @@ func (s *Service) Send(ctx context.Context, request SendMessageRequest) (SendMes
 	trace.record.OutputTokens = aiResponse.OutputTokens
 	trace.record.EstimatedCost = aiResponse.EstimatedCost
 	trace.finish(response, firstNonEmpty(aiResponse.Model, "ai-service"), elapsedMilliseconds(startedAt))
+	s.saveSessionMemory(ctx, memory, request, response, trace)
+	s.emitTrace(trace)
+	return response, nil
+}
+
+func (s *Service) saveRAGDirectResponse(ctx context.Context, startedAt time.Time, traceID string, request SendMessageRequest, match RAGSearchResult, memory SessionMemoryRecord, trace *traceRecorder) (SendMessageResponse, error) {
+	response := SendMessageResponse{
+		TraceID:        traceID,
+		ConversationID: request.ConversationID,
+		ResponseType:   "answer",
+		Content:        responseContent(ragDirectReplyText(match), nil),
+		Handoff:        HandoffDecision{Required: false},
+		Intent:         "rag_direct",
+		Route:          "rag_direct",
+		RiskLevel:      "low",
+		Citations:      citationsFromRAGMatches([]RAGSearchResult{match}),
+		MessageID:      request.MessageID,
+	}
+
+	if err := s.store.SaveMessage(ctx, MessageRecord{
+		MessageID:      newID("message"),
+		ConversationID: request.ConversationID,
+		SenderType:     "assistant",
+		MessageType:    "text",
+		Content:        response.Content.Text,
+	}); err != nil {
+		s.saveTraceError(ctx, trace, err)
+		return SendMessageResponse{}, err
+	}
+	if err := s.store.SaveAIEvent(ctx, AIEventRecord{
+		TraceID:         traceID,
+		ConversationID:  request.ConversationID,
+		MessageID:       request.MessageID,
+		Intent:          response.Intent,
+		Route:           response.Route,
+		ResponseType:    response.ResponseType,
+		HandoffRequired: response.Handoff.Required,
+		HandoffReason:   response.Handoff.Reason,
+		LatencyMS:       elapsedMilliseconds(startedAt),
+		ModelUsed:       "rag_direct",
+	}); err != nil {
+		s.saveTraceError(ctx, trace, err)
+		return SendMessageResponse{}, err
+	}
+	trace.finish(response, "rag_direct", elapsedMilliseconds(startedAt))
 	s.saveSessionMemory(ctx, memory, request, response, trace)
 	s.emitTrace(trace)
 	return response, nil
@@ -704,50 +754,32 @@ func (s *Service) searchRAG(ctx context.Context, query string, topK int) (RAGSea
 		}
 	}
 
-	keywordMatches, err := s.searchKeywordKnowledge(ctx, query, topK)
-	if err != nil {
-		return RAGSearchResult{}, nil, false, cacheStatus, err
+	keywordCh := make(chan ragSearchOutcome, 1)
+	vectorCh := make(chan ragSearchOutcome, 1)
+	go func() {
+		matches, err := s.searchKeywordKnowledge(ctx, query, topK)
+		keywordCh <- ragSearchOutcome{matches: matches, err: err}
+	}()
+	go func() {
+		matches, err := s.searchVectorKnowledge(ctx, query, topK)
+		vectorCh <- ragSearchOutcome{matches: matches, err: err}
+	}()
+
+	keywordOutcome := <-keywordCh
+	vectorOutcome := <-vectorCh
+	if keywordOutcome.err != nil && vectorOutcome.err != nil {
+		return RAGSearchResult{}, nil, false, cacheStatus, vectorOutcome.err
+	}
+	keywordMatches := keywordOutcome.matches
+	if keywordOutcome.err != nil {
+		keywordMatches = nil
+	}
+	vectorMatches := vectorOutcome.matches
+	if vectorOutcome.err != nil {
+		vectorMatches = nil
 	}
 
-	// Python 负责 embedding + Milvus 召回；Gateway 根据 chunk_id 回查 MySQL 取完整知识内容。
-	response, err := s.aiClient.SearchVectors(ctx, ai.VectorSearchRequest{Query: query, TopK: topK})
-	if err != nil {
-		return RAGSearchResult{}, nil, false, cacheStatus, err
-	}
-	if len(response.Items) == 0 {
-		matches := mergeRAGMatches(query, nil, keywordMatches, topK)
-		s.setRAGCache(ctx, query, topK, matches)
-		return RAGSearchResult{}, matches, false, cacheStatus, nil
-	}
-
-	chunkIDs := make([]string, 0, len(response.Items))
-	scores := map[string]float64{}
-	chunkText := map[string]string{}
-	for _, item := range response.Items {
-		chunkIDs = append(chunkIDs, item.ChunkID)
-		scores[item.ChunkID] = item.Score
-		chunkText[item.ChunkID] = item.ChunkText
-	}
-	records, err := s.store.GetKnowledgeByChunkIDs(ctx, chunkIDs)
-	if err != nil {
-		return RAGSearchResult{}, nil, false, cacheStatus, err
-	}
-
-	matches := make([]RAGSearchResult, 0, len(response.Items))
-	for _, item := range response.Items {
-		result, ok := records[item.ChunkID]
-		if !ok {
-			result = RAGSearchResult{
-				ChunkID:     item.ChunkID,
-				KnowledgeID: item.KnowledgeID,
-			}
-		}
-		result.Score = scores[item.ChunkID]
-		result.ChunkText = firstNonEmpty(chunkText[item.ChunkID], result.ChunkText)
-		result.Source = "vector"
-		matches = append(matches, result)
-	}
-	matches = mergeRAGMatches(query, matches, keywordMatches, topK)
+	matches := mergeRAGMatches(query, vectorMatches, keywordMatches, topK)
 	matches = s.rerankRAGMatches(ctx, query, matches, topK)
 	matched := ragHasUsableKnowledge(matches)
 	s.setRAGCache(ctx, query, topK, matches)
@@ -820,6 +852,51 @@ func (s *Service) rerankRAGMatches(ctx context.Context, query string, matches []
 		return reranked[:topK]
 	}
 	return reranked
+}
+
+type ragSearchOutcome struct {
+	matches []RAGSearchResult
+	err     error
+}
+
+func (s *Service) searchVectorKnowledge(ctx context.Context, query string, topK int) ([]RAGSearchResult, error) {
+	// Python 负责 embedding + Milvus 召回；Gateway 根据 chunk_id 回查 MySQL 取完整知识内容。
+	response, err := s.aiClient.SearchVectors(ctx, ai.VectorSearchRequest{Query: query, TopK: topK})
+	if err != nil {
+		return nil, err
+	}
+	if len(response.Items) == 0 {
+		return []RAGSearchResult{}, nil
+	}
+
+	chunkIDs := make([]string, 0, len(response.Items))
+	scores := map[string]float64{}
+	chunkText := map[string]string{}
+	for _, item := range response.Items {
+		chunkIDs = append(chunkIDs, item.ChunkID)
+		scores[item.ChunkID] = item.Score
+		chunkText[item.ChunkID] = item.ChunkText
+	}
+	records, err := s.store.GetKnowledgeByChunkIDs(ctx, chunkIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	matches := make([]RAGSearchResult, 0, len(response.Items))
+	for _, item := range response.Items {
+		result, ok := records[item.ChunkID]
+		if !ok {
+			result = RAGSearchResult{
+				ChunkID:     item.ChunkID,
+				KnowledgeID: item.KnowledgeID,
+			}
+		}
+		result.Score = scores[item.ChunkID]
+		result.ChunkText = firstNonEmpty(chunkText[item.ChunkID], result.ChunkText)
+		result.Source = "vector"
+		matches = append(matches, result)
+	}
+	return matches, nil
 }
 
 func normalizeRerankScore(rerankScore float64, fallback float64) float64 {
@@ -911,6 +988,10 @@ func withCacheStatus(detail string, status string) string {
 const (
 	ragMinScore                 = 0.78
 	ragStrongTextMinScore       = 0.74
+	ragDirectMinScore           = 0.90
+	ragDirectStrongScore        = 0.93
+	ragDirectMinGap             = 0.08
+	ragDirectMinContentRunes    = 20
 	ragNoKnowledgeFallbackReply = "抱歉，暂未在知识库中查到与您问题直接相关的内容。您可以换个方式描述问题，或选择转人工客服为您处理。"
 )
 
@@ -943,6 +1024,48 @@ func usableRAGMatches(matches []RAGSearchResult) []RAGSearchResult {
 		usable = append(usable, match)
 	}
 	return usable
+}
+
+func shouldDirectReplyRAG(query string, matches []RAGSearchResult) bool {
+	if len(matches) == 0 {
+		return false
+	}
+	top := matches[0]
+	content := strings.TrimSpace(ragDirectReplyText(top))
+	if top.Score < ragDirectMinScore {
+		return false
+	}
+	if utf8.RuneCountInString(content) < ragDirectMinContentRunes {
+		return false
+	}
+	if top.Score < ragDirectStrongScore && len(matches) > 1 && top.Score-matches[1].Score < ragDirectMinGap {
+		return false
+	}
+	return !isRiskyDirectReplyQuery(query)
+}
+
+func isRiskyDirectReplyQuery(query string) bool {
+	normalized := normalizeRAGText(query)
+	riskyTerms := []string{
+		"退款",
+		"退钱",
+		"未成年",
+		"封号",
+		"解封",
+		"账号安全",
+		"帐号安全",
+		"换绑",
+		"验证码",
+		"注销",
+		"人工",
+		"投诉",
+	}
+	for _, term := range riskyTerms {
+		if strings.Contains(normalized, normalizeRAGText(term)) {
+			return true
+		}
+	}
+	return false
 }
 
 func mergeRAGMatches(query string, vectorMatches []RAGSearchResult, keywordMatches []RAGSearchResult, limit int) []RAGSearchResult {
@@ -1119,6 +1242,22 @@ func citationsFromRetrievedDocs(docs []ai.RetrievedDocument) []CitationRecord {
 			DocID:    doc.DocID,
 			Question: doc.Question,
 			Score:    doc.Score,
+		})
+	}
+	return citations
+}
+
+func citationsFromRAGMatches(matches []RAGSearchResult) []CitationRecord {
+	citations := make([]CitationRecord, 0, len(matches))
+	for _, match := range matches {
+		docID := firstNonEmpty(match.KnowledgeID, match.ChunkID)
+		if strings.TrimSpace(docID) == "" {
+			continue
+		}
+		citations = append(citations, CitationRecord{
+			DocID:    docID,
+			Question: match.Question,
+			Score:    match.Score,
 		})
 	}
 	return citations
@@ -1323,6 +1462,21 @@ func ragReply(result RAGSearchResult) string {
 		return result.Content
 	}
 	return result.ChunkText
+}
+
+func ragDirectReplyText(result RAGSearchResult) string {
+	content := strings.TrimSpace(result.Content)
+	if content != "" {
+		return content
+	}
+	text := strings.TrimSpace(result.ChunkText)
+	markers := []string{"内容：", "内容:"}
+	for _, marker := range markers {
+		if index := strings.Index(text, marker); index >= 0 {
+			return strings.TrimSpace(text[index+len(marker):])
+		}
+	}
+	return text
 }
 
 func firstNonEmpty(value string, fallback string) string {
