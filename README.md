@@ -37,7 +37,10 @@ go run ./cmd/server
 ```env
 HTTP_ADDR=:8080
 AI_SERVICE_BASE_URL=http://localhost:8000
-MYSQL_DSN=ai_cs:ai_cs_pass@tcp(127.0.0.1:3306)/ai_customer_service?parseTime=true&charset=utf8mb4&loc=Local
+MYSQL_DSN=ai_cs_github:<mysql-password>@tcp(127.0.0.1:3306)/ai_customer_service_github?parseTime=true&charset=utf8mb4&loc=Local
+REDIS_ADDR=127.0.0.1:6379
+REDIS_PASSWORD=
+REDIS_DB=1
 ```
 
 未设置 `MYSQL_DSN` 时仍可启动，但不会持久化会话（使用内存 NoopStore）。
