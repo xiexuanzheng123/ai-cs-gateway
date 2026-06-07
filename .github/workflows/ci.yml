@@ -27,3 +27,28 @@ jobs:
 
       - name: Build binary
         run: go build -o bin/server ./cmd/server
+
+  deploy:
+    needs: test-and-build
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_BASE_PATH: ${{ secrets.DEPLOY_BASE_PATH }}
+    steps:
+      - name: Deploy to Tencent Cloud CVM
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script_stop: true
+          envs: DEPLOY_BASE_PATH
+          script: |
+            set -euo pipefail
+            BASE="${DEPLOY_BASE_PATH:-$HOME/ai-cs}"
+            cd "$BASE/ai-cs-gateway"
+            git pull --ff-only
+            export PATH="$PATH:/usr/local/go/bin"
+            go build -o bin/server ./cmd/server
+            sudo systemctl restart ai-cs-gateway
+            sudo systemctl is-active ai-cs-gateway
